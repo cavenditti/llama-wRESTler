@@ -1,0 +1,17 @@
+[project]
+name = "llama-wrestler"
+version = "0.1.0"
+description = "REST endpoint tester using OpenAI-compatible APIs for LLMs"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic-ai",
+    "httpx",
+    "logfire",
+    "pydantic-settings",
+]
+
+[dependency-groups]
+dev = [
+    "devtools>=0.12.2",
+]
