@@ -1,5 +1,6 @@
 import asyncio
 import httpx
+import json
 import logfire
 from pathlib import Path
 import argparse
@@ -84,6 +85,15 @@ async def main():
         output_dir.mkdir(exist_ok=True)
 
         run_directory = create_run_directory(output_dir, args.openapi_url)
+
+        # Save the OpenAPI spec if it was fetched
+        if deps.fetched_openapi_spec:
+            openapi_filename = run_directory / "openapi_spec.json"
+            with open(openapi_filename, "w") as f:
+                # Parse and format the JSON content
+                spec_content = json.loads(deps.fetched_openapi_spec["content"])
+                json.dump(spec_content, f, indent=2)
+            print(f"OpenAPI spec saved to {openapi_filename}")
 
         test_plan_filename = run_directory / "test_plan.json"
 

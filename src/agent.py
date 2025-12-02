@@ -11,6 +11,7 @@ from .settings import settings
 class AgentDeps:
     http_client: httpx.AsyncClient
     repo_path: Path | None = None
+    fetched_openapi_spec: dict | None = None  # Stores {url: str, content: str}
 
 
 system_prompt = """
@@ -46,7 +47,10 @@ async def fetch_openapi_spec(ctx: RunContext[AgentDeps], url: str) -> str:
     try:
         response = await ctx.deps.http_client.get(url)
         response.raise_for_status()
-        return response.text
+        content = response.text
+        # Store the fetched spec in the state
+        ctx.deps.fetched_openapi_spec = {"url": url, "content": content}
+        return content
     except Exception as e:
         return f"Error fetching OpenAPI spec: {str(e)}"
 
