@@ -53,6 +53,18 @@ class PreparedRequestBody:
     headers: dict[str, str] = field(default_factory=dict)
 
 
+def choose_auth_token(step: TestStep, ctx: ExecutionContext) -> str | None:
+    """Select an auth token for a step, preferring dependency providers."""
+    for dep in step.depends_on:
+        if dep in ctx.auth_tokens:
+            return ctx.auth_tokens[dep]
+
+    if ctx.auth_tokens:
+        return next(reversed(ctx.auth_tokens.values()))
+
+    return None
+
+
 def resolve_placeholders(value: Any, step_responses: dict[str, Any]) -> Any:
     """
     Resolve placeholders like {{step_id.field_path}} with actual values from previous responses.
@@ -232,6 +244,14 @@ async def execute_step(
             **(prepared_body.headers if prepared_body.headers else {}),
             **(headers if headers else {}),
         }
+
+        if step.auth_requirement in {
+            AuthRequirement.REQUIRED,
+            AuthRequirement.OPTIONAL,
+        }:
+            token = choose_auth_token(step, ctx)
+            if token and "Authorization" not in final_headers:
+                final_headers["Authorization"] = f"Bearer {token}"
 
         request_kwargs: dict[str, Any] = {
             "method": step.method,
