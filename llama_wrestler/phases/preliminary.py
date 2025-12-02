@@ -2,8 +2,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import httpx
 
-from ..agent import agent, AgentDeps
-from ..models import TestPlan
+from llama_wrestler.agent import agent, AgentDeps
+from llama_wrestler.models import TestPlan
 
 
 @dataclass

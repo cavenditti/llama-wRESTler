@@ -3,8 +3,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 
-from ..models import TestPlan, TestCredentials
-from ..settings import settings
+from llama_wrestler.models import TestPlan, TestCredentials
+from llama_wrestler.settings import settings
 
 
 class MockedPayload(BaseModel):

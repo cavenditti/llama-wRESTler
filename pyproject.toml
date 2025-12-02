@@ -9,9 +9,18 @@ dependencies = [
     "httpx",
     "logfire",
     "pydantic-settings",
+    "python-dotenv",
 ]
+
+[project.scripts]
+llama-wrestler = "llama_wrestler.main:main"
 
 [dependency-groups]
 dev = [
     "devtools>=0.12.2",
+    "pytest>=8.0.0",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

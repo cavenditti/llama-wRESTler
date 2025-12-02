@@ -7,8 +7,8 @@ import re
 import time
 from pydantic import BaseModel, Field
 
-from ..models import TestPlan, TestStep, BodyFormat, AuthRequirement
-from .data_generation import GeneratedTestData, MockedPayload
+from llama_wrestler.models import TestPlan, TestStep, BodyFormat, AuthRequirement
+from llama_wrestler.phases.data_generation import GeneratedTestData, MockedPayload
 
 
 class StepResult(BaseModel):
@@ -90,6 +90,7 @@ def resolve_placeholders(value: Any, step_responses: dict[str, Any]) -> Any:
         return current
 
     if isinstance(value, str):
+
         def _replace(match: re.Match[str]) -> str:
             step_id, field_path = match.group(1), match.group(2)
             if step_id not in step_responses:
@@ -130,7 +131,7 @@ def build_url(
     if query_params:
         filtered_params = {k: v for k, v in query_params.items() if v is not None}
         if filtered_params:
-            full_url = str(httpx.URL(full_url).copy_add_params(filtered_params))
+            full_url = str(httpx.URL(full_url).copy_merge_params(filtered_params))
 
     return full_url
 
@@ -157,7 +158,8 @@ def prepare_request_body(
         # Convert all values to strings for form data, filter out None values
         form_data = {k: str(v) for k, v in request_body.items() if v is not None}
         return PreparedRequestBody(
-            data=form_data, headers={"Content-Type": "application/x-www-form-urlencoded"}
+            data=form_data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
 
     elif body_format == BodyFormat.MULTIPART:
@@ -324,9 +326,7 @@ def get_execution_order(steps: list[TestStep]) -> list[list[TestStep]]:
     """
     step_map = {step.id: step for step in steps}
     step_ids = set(step_map.keys())
-    missing = {
-        dep for step in steps for dep in step.depends_on if dep not in step_ids
-    }
+    missing = {dep for step in steps for dep in step.depends_on if dep not in step_ids}
     if missing:
         missing_list = ", ".join(sorted(missing))
         raise ValueError(f"Missing dependencies in test plan: {missing_list}")

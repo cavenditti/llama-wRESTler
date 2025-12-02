@@ -3,8 +3,8 @@ import httpx
 from pydantic_ai import Agent, RunContext
 from pathlib import Path
 
-from .models import TestPlan
-from .settings import settings
+from llama_wrestler.models import TestPlan
+from llama_wrestler.settings import settings
 
 
 @dataclass

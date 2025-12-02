@@ -8,12 +8,12 @@ import re
 from datetime import datetime
 from dotenv import load_dotenv
 
-from src.phases import (
+from llama_wrestler.phases import (
     run_preliminary_phase,
     run_data_generation_phase,
     run_test_execution_phase,
 )
-from src.models import TestCredentials
+from llama_wrestler.models import TestCredentials
 
 # Load environment variables from .env file
 load_dotenv()
@@ -62,7 +62,7 @@ def create_run_directory(output_dir: Path, url: str) -> Path:
     return run_directory
 
 
-async def main():
+async def run():
     parser = argparse.ArgumentParser(description="Generate and run REST API tests.")
     parser.add_argument("openapi_url", help="URL to the OpenAPI specification")
     parser.add_argument(
@@ -203,4 +203,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(run())
+
+
+def main():
+    """Entry point for the console script."""
+    asyncio.run(run())
