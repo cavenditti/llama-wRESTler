@@ -13,7 +13,7 @@ from llama_wrestler.phases import (
     run_data_generation_phase,
     run_test_execution_phase,
 )
-from llama_wrestler.models import TestCredentials
+from llama_wrestler.models import APICredentials
 
 # Load environment variables from .env file
 load_dotenv()
@@ -95,12 +95,12 @@ async def run():
         if creds_path.exists():
             with open(creds_path) as f:
                 creds_data = json.load(f)
-            credentials = TestCredentials(**creds_data)
+            credentials = APICredentials(**creds_data)
             print(f"Loaded credentials from {args.credentials_file}")
         else:
             print(f"Warning: Credentials file not found: {args.credentials_file}")
     elif args.username or args.password:
-        credentials = TestCredentials(username=args.username, password=args.password)
+        credentials = APICredentials(username=args.username, password=args.password)
         print(f"Using provided credentials for user: {args.username}")
 
     # Output directory setup

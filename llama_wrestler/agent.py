@@ -3,7 +3,7 @@ import httpx
 from pydantic_ai import Agent, RunContext
 from pathlib import Path
 
-from llama_wrestler.models import TestPlan
+from llama_wrestler.models import APIPlan
 from llama_wrestler.settings import settings
 
 
@@ -64,7 +64,7 @@ DEPENDENCY GRAPH RULES:
 agent = Agent(
     model=f"openai:{settings.openai_model}",
     deps_type=AgentDeps,
-    output_type=TestPlan,
+    output_type=APIPlan,
     system_prompt=system_prompt,
 )
 

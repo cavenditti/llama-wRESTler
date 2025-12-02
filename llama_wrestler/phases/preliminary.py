@@ -3,14 +3,14 @@ from pathlib import Path
 import httpx
 
 from llama_wrestler.agent import agent, AgentDeps
-from llama_wrestler.models import TestPlan
+from llama_wrestler.models import APIPlan
 
 
 @dataclass
 class PreliminaryResult:
     """Result from the preliminary phase."""
 
-    test_plan: TestPlan
+    test_plan: APIPlan
     openapi_spec: dict | None
     openapi_url: str
 

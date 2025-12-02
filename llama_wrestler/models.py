@@ -1,9 +1,10 @@
 from enum import Enum
+from pydantic.fields import Field
 from typing import Any, List, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
-class TestCredentials(BaseModel):
+class APICredentials(BaseModel):
     """
     Credentials to use for authentication during testing.
     Flexible key-value structure to support various auth schemes.
@@ -59,7 +60,7 @@ class AuthRequirement(str, Enum):
     AUTH_PROVIDER = "auth_provider"  # This endpoint provides authentication tokens
 
 
-class TestStep(BaseModel):
+class APIStep(BaseModel):
     id: str = Field(description="Unique identifier for this test step")
     description: str = Field(description="Description of what this step tests")
     endpoint: str = Field(description="The endpoint path being tested, e.g., /users")
@@ -88,7 +89,7 @@ class TestStep(BaseModel):
     )
 
 
-class TestPlan(BaseModel):
+class APIPlan(BaseModel):
     summary: str = Field(description="High-level summary of the testing strategy")
     base_url: str = Field(description="The base URL of the API")
-    steps: List[TestStep] = Field(description="List of test steps to execute")
+    steps: List[APIStep] = Field(description="List of test steps to execute")

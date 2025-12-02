@@ -3,7 +3,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 
-from llama_wrestler.models import TestPlan, TestCredentials
+from llama_wrestler.models import APIPlan, APICredentials
 from llama_wrestler.settings import settings
 
 
@@ -40,9 +40,9 @@ class GeneratedTestData(BaseModel):
 class DataGenerationDeps:
     """Dependencies for the data generation agent."""
 
-    test_plan: TestPlan
+    test_plan: APIPlan
     openapi_spec: dict
-    credentials: TestCredentials | None = None
+    credentials: APICredentials | None = None
 
 
 data_generation_agent = Agent(
@@ -195,9 +195,9 @@ async def get_test_credentials(ctx: RunContext[DataGenerationDeps]) -> str:
 
 
 async def run_data_generation_phase(
-    test_plan: TestPlan,
+    test_plan: APIPlan,
     openapi_spec: dict,
-    credentials: TestCredentials | None = None,
+    credentials: APICredentials | None = None,
 ) -> GeneratedTestData:
     """
     Run the data generation phase: generate mock data for all test steps.

@@ -7,7 +7,7 @@ import re
 import time
 from pydantic import BaseModel, Field
 
-from llama_wrestler.models import TestPlan, TestStep, BodyFormat, AuthRequirement
+from llama_wrestler.models import APIPlan, APIStep, BodyFormat, AuthRequirement
 from llama_wrestler.phases.data_generation import GeneratedTestData, MockedPayload
 
 
@@ -25,7 +25,7 @@ class StepResult(BaseModel):
     auth_token_extracted: str | None = None  # Token if this was an auth provider step
 
 
-class TestExecutionResult(BaseModel):
+class APIExecutionResult(BaseModel):
     """Result of the entire test execution."""
 
     total_steps: int
@@ -56,7 +56,7 @@ class PreparedRequestBody:
     headers: dict[str, str] = field(default_factory=dict)
 
 
-def choose_auth_token(step: TestStep, ctx: ExecutionContext) -> str | None:
+def choose_auth_token(step: APIStep, ctx: ExecutionContext) -> str | None:
     """Select an auth token for a step, preferring dependency providers."""
     for dep in step.depends_on:
         if dep in ctx.auth_tokens:
@@ -213,7 +213,7 @@ def extract_token_from_response(
 
 
 async def execute_step(
-    step: TestStep,
+    step: APIStep,
     payload: MockedPayload | None,
     ctx: ExecutionContext,
 ) -> StepResult:
@@ -319,7 +319,7 @@ async def execute_step(
         )
 
 
-def get_execution_order(steps: list[TestStep]) -> list[list[TestStep]]:
+def get_execution_order(steps: list[APIStep]) -> list[list[APIStep]]:
     """
     Determine the execution order based on dependencies.
     Returns a list of batches, where each batch can be executed in parallel.
@@ -340,7 +340,7 @@ def get_execution_order(steps: list[TestStep]) -> list[list[TestStep]]:
             indegree[step.id] += 1
 
     queue: deque[str] = deque([sid for sid, deg in indegree.items() if deg == 0])
-    batches: list[list[TestStep]] = []
+    batches: list[list[APIStep]] = []
     processed = 0
 
     while queue:
@@ -362,10 +362,10 @@ def get_execution_order(steps: list[TestStep]) -> list[list[TestStep]]:
 
 
 async def run_test_execution_phase(
-    test_plan: TestPlan,
+    test_plan: APIPlan,
     test_data: GeneratedTestData,
     http_client: httpx.AsyncClient | None = None,
-) -> TestExecutionResult:
+) -> APIExecutionResult:
     """
     Run the test execution phase: execute all test steps with the generated data.
 
@@ -375,13 +375,13 @@ async def run_test_execution_phase(
         http_client: Optional HTTP client (will create one if not provided)
 
     Returns:
-        TestExecutionResult with results for all steps
+        APIExecutionResult with results for all steps
     """
 
     # Create payload lookup
     payload_map = {p.step_id: p for p in test_data.payloads}
 
-    async def _run_with_client(client: httpx.AsyncClient) -> TestExecutionResult:
+    async def _run_with_client(client: httpx.AsyncClient) -> APIExecutionResult:
         ctx = ExecutionContext(http_client=client, base_url=test_plan.base_url)
 
         results: list[StepResult] = []
@@ -394,7 +394,7 @@ async def run_test_execution_phase(
             batches = get_execution_order(test_plan.steps)
         except ValueError as err:
             error_message = str(err)
-            return TestExecutionResult(
+            return APIExecutionResult(
                 total_steps=len(test_plan.steps),
                 passed=0,
                 failed=len(test_plan.steps),
@@ -441,7 +441,7 @@ async def run_test_execution_phase(
                 else:
                     failed += 1
 
-        return TestExecutionResult(
+        return APIExecutionResult(
             total_steps=len(test_plan.steps),
             passed=passed,
             failed=failed,
