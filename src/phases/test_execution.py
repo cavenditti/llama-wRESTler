@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import quote
 import httpx
 import re
 from pydantic import BaseModel, Field
@@ -41,32 +42,52 @@ class ExecutionContext:
     auth_tokens: dict[str, str] = field(default_factory=dict)  # step_id -> token
 
 
+@dataclass
+class PreparedRequestBody:
+    """Preprocessed request body pieces ready for httpx."""
+
+    json: Any | None = None
+    data: dict[str, str] | None = None
+    files: dict[str, Any] | None = None
+    content: bytes | str | None = None
+    headers: dict[str, str] = field(default_factory=dict)
+
+
 def resolve_placeholders(value: Any, step_responses: dict[str, Any]) -> Any:
     """
     Resolve placeholders like {{step_id.field_path}} with actual values from previous responses.
     """
+    placeholder_pattern = re.compile(r"\{\{([\w-]+)\.([^}]+)\}\}")
+
+    def _resolve_from_response(step_id: str, field_path: str) -> Any:
+        response = step_responses[step_id]
+        current: Any = response
+        for part in field_path.split("."):
+            if isinstance(current, dict):
+                if part not in current:
+                    raise KeyError(part)
+                current = current[part]
+            elif isinstance(current, list) and part.isdigit():
+                current = current[int(part)]
+            else:
+                raise KeyError(part)
+
+        return current
+
     if isinstance(value, str):
-        pattern = r"\{\{(\w+)\.([^}]+)\}\}"
-        matches = re.findall(pattern, value)
-        for step_id, field_path in matches:
-            if step_id in step_responses:
-                response = step_responses[step_id]
-                # Navigate the field path
-                parts = field_path.split(".")
-                current = response
-                try:
-                    for part in parts:
-                        if isinstance(current, dict):
-                            current = current[part]
-                        elif isinstance(current, list) and part.isdigit():
-                            current = current[int(part)]
-                        else:
-                            current = getattr(current, part)
-                    placeholder = f"{{{{{step_id}.{field_path}}}}}"
-                    value = value.replace(placeholder, str(current))
-                except (KeyError, IndexError, AttributeError):
-                    pass  # Keep placeholder if resolution fails
-        return value
+        def _replace(match: re.Match[str]) -> str:
+            step_id, field_path = match.group(1), match.group(2)
+            if step_id not in step_responses:
+                return match.group(0)
+
+            try:
+                resolved = _resolve_from_response(step_id, field_path)
+            except (KeyError, IndexError, TypeError):
+                return match.group(0)
+
+            return str(resolved)
+
+        return placeholder_pattern.sub(_replace, value)
     elif isinstance(value, dict):
         return {k: resolve_placeholders(v, step_responses) for k, v in value.items()}
     elif isinstance(value, list):
@@ -85,53 +106,59 @@ def build_url(
     url = endpoint
     for key, value in path_params.items():
         if value is not None:
-            url = url.replace(f"{{{key}}}", str(value))
+            url = url.replace(f"{{{key}}}", quote(str(value), safe=""))
 
     # Build full URL
     full_url = f"{base_url.rstrip('/')}/{url.lstrip('/')}"
 
     # Add query parameters (filter out None values and convert to strings)
     if query_params:
-        filtered_params = {k: str(v) for k, v in query_params.items() if v is not None}
+        filtered_params = {k: v for k, v in query_params.items() if v is not None}
         if filtered_params:
-            query_string = "&".join(f"{k}={v}" for k, v in filtered_params.items())
-            full_url = f"{full_url}?{query_string}"
+            full_url = str(httpx.URL(full_url).copy_add_params(filtered_params))
 
     return full_url
 
 
 def prepare_request_body(
     body_format: BodyFormat,
-    request_body: dict | None,
-) -> tuple[dict | None, dict | None, dict[str, str]]:
+    request_body: Any | None,
+) -> PreparedRequestBody:
     """
     Prepare the request body based on the body format.
 
     Returns:
-        Tuple of (json_body, form_data, extra_headers)
+        PreparedRequestBody containing the correct pieces for httpx
     """
     if request_body is None or body_format == BodyFormat.NONE:
-        return None, None, {}
+        return PreparedRequestBody()
 
     if body_format == BodyFormat.JSON:
-        return request_body, None, {"Content-Type": "application/json"}
+        return PreparedRequestBody(
+            json=request_body, headers={"Content-Type": "application/json"}
+        )
 
     elif body_format == BodyFormat.FORM_URLENCODED:
         # Convert all values to strings for form data, filter out None values
         form_data = {k: str(v) for k, v in request_body.items() if v is not None}
-        return None, form_data, {"Content-Type": "application/x-www-form-urlencoded"}
+        return PreparedRequestBody(
+            data=form_data, headers={"Content-Type": "application/x-www-form-urlencoded"}
+        )
 
     elif body_format == BodyFormat.MULTIPART:
-        # For multipart, we need special handling
-        # httpx handles this with the `files` parameter, but for now we'll use form data
-        form_data = {k: str(v) for k, v in request_body.items() if v is not None}
-        return None, form_data, {}  # Let httpx set the Content-Type for multipart
+        # Use files to let httpx set Content-Type properly
+        files = {k: (None, str(v)) for k, v in request_body.items() if v is not None}
+        return PreparedRequestBody(files=files)
 
     elif body_format == BodyFormat.RAW:
-        # Raw body - just pass as-is, treated as JSON for now
-        return request_body, None, {}
+        content: bytes | str
+        if isinstance(request_body, (bytes, bytearray)):
+            content = bytes(request_body)
+        else:
+            content = str(request_body)
+        return PreparedRequestBody(content=content)
 
-    return None, None, {}
+    return PreparedRequestBody()
 
 
 def extract_token_from_response(
@@ -198,30 +225,29 @@ async def execute_step(
         url = build_url(ctx.base_url, step.endpoint, path_params, query_params)
 
         # Prepare body based on format
-        json_body, form_data, content_headers = prepare_request_body(
-            step.body_format, request_body
-        )
+        prepared_body = prepare_request_body(step.body_format, request_body)
 
         # Merge headers (payload headers take precedence over content headers)
-        final_headers = {**content_headers, **(headers if headers else {})}
+        final_headers = {
+            **(prepared_body.headers if prepared_body.headers else {}),
+            **(headers if headers else {}),
+        }
 
-        # Make the request with appropriate body format
-        if form_data is not None:
-            # Form-urlencoded or multipart
-            response = await ctx.http_client.request(
-                method=step.method,
-                url=url,
-                data=form_data,
-                headers=final_headers if final_headers else None,
-            )
-        else:
-            # JSON or no body
-            response = await ctx.http_client.request(
-                method=step.method,
-                url=url,
-                json=json_body if json_body else None,
-                headers=final_headers if final_headers else None,
-            )
+        request_kwargs: dict[str, Any] = {
+            "method": step.method,
+            "url": url,
+            "headers": final_headers or None,
+        }
+        if prepared_body.json is not None:
+            request_kwargs["json"] = prepared_body.json
+        if prepared_body.data is not None:
+            request_kwargs["data"] = prepared_body.data
+        if prepared_body.files is not None:
+            request_kwargs["files"] = prepared_body.files
+        if prepared_body.content is not None:
+            request_kwargs["content"] = prepared_body.content
+
+        response = await ctx.http_client.request(**request_kwargs)
 
         duration_ms = (time.time() - start_time) * 1000
 
