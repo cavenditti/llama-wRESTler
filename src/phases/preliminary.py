@@ -9,6 +9,7 @@ from ..models import TestPlan
 @dataclass
 class PreliminaryResult:
     """Result from the preliminary phase."""
+
     test_plan: TestPlan
     openapi_spec: dict | None
     openapi_url: str
@@ -21,15 +22,16 @@ async def run_preliminary_phase(
 ) -> PreliminaryResult:
     """
     Run the preliminary phase: analyze OpenAPI spec and generate test plan.
-    
+
     Args:
         openapi_url: URL to the OpenAPI specification
         repo_path: Optional path to local repository for analysis
         http_client: Optional HTTP client (will create one if not provided)
-    
+
     Returns:
         PreliminaryResult containing the test plan and fetched OpenAPI spec
     """
+
     async def _run_with_client(client: httpx.AsyncClient) -> PreliminaryResult:
         deps = AgentDeps(http_client=client, repo_path=repo_path)
 
@@ -43,6 +45,7 @@ async def run_preliminary_phase(
         openapi_spec = None
         if deps.fetched_openapi_spec:
             import json
+
             openapi_spec = json.loads(deps.fetched_openapi_spec["content"])
 
         return PreliminaryResult(

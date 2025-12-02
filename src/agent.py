@@ -28,7 +28,37 @@ Your task:
     - CRUD operations usually have dependencies (e.g., Create User -> Get User -> Update User -> Delete User).
     - Independent operations should not depend on each other to allow parallel execution.
     - Ensure the 'depends_on' field correctly reflects these relationships.
-4. Output the plan as a structured JSON object.
+4. Identify and properly handle authentication:
+    - Mark login/token endpoints as AUTH_PROVIDER
+    - Make all protected endpoints depend on the authentication step
+    - Mark public endpoints as NONE
+5. Set the correct body_format for each endpoint:
+    - Use "form_urlencoded" for OAuth2 token endpoints (/token, /login with OAuth2PasswordRequestForm)
+    - Use "multipart" for file upload endpoints
+    - Use "json" for standard API calls with JSON bodies
+    - Use "none" for GET requests and DELETE without body
+6. Output the plan as a structured JSON object.
+
+AUTHENTICATION HANDLING:
+- Look for OAuth2 security schemes in the OpenAPI spec
+- OAuth2 password flow endpoints (requestBody with x-www-form-urlencoded) MUST use body_format="form_urlencoded"
+- Set auth_token_path to the JSON path where the token appears (e.g., "access_token")
+- All endpoints requiring authentication should:
+  - Have auth_requirement="required"
+  - Have depends_on including the auth step ID
+  - Use the token via headers: {"Authorization": "Bearer {{auth_step_id.access_token}}"}
+
+BODY FORMAT DETECTION:
+- Check the "requestBody.content" in OpenAPI spec:
+  - "application/json" -> body_format="json"
+  - "application/x-www-form-urlencoded" -> body_format="form_urlencoded"
+  - "multipart/form-data" -> body_format="multipart"
+- If no requestBody -> body_format="none"
+
+DEPENDENCY GRAPH RULES:
+- Authentication endpoints should have NO dependencies (they come first)
+- Protected CRUD operations should depend on auth + any data dependencies
+- Example flow: auth_login -> create_item -> get_item -> update_item -> delete_item
 """
 
 agent = Agent(

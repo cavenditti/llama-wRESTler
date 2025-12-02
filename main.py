@@ -8,14 +8,15 @@ import re
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
-
 from src.phases import (
     run_preliminary_phase,
     run_data_generation_phase,
     run_test_execution_phase,
 )
+from src.models import TestCredentials
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logfire
 logfire.configure()
@@ -70,9 +71,37 @@ async def main():
     parser.add_argument(
         "--skip-execution", action="store_true", help="Skip the test execution phase"
     )
+    # Credential arguments
+    parser.add_argument(
+        "--username", "-u", help="Username/email for authentication", default=None
+    )
+    parser.add_argument(
+        "--password", "-p", help="Password for authentication", default=None
+    )
+    parser.add_argument(
+        "--credentials-file",
+        "-c",
+        help="Path to JSON file with credentials (username, password, and extra fields)",
+        default=None,
+    )
     args = parser.parse_args()
 
     repo_path = Path(args.repo) if args.repo else None
+
+    # Build credentials
+    credentials = None
+    if args.credentials_file:
+        creds_path = Path(args.credentials_file)
+        if creds_path.exists():
+            with open(creds_path) as f:
+                creds_data = json.load(f)
+            credentials = TestCredentials(**creds_data)
+            print(f"Loaded credentials from {args.credentials_file}")
+        else:
+            print(f"Warning: Credentials file not found: {args.credentials_file}")
+    elif args.username or args.password:
+        credentials = TestCredentials(username=args.username, password=args.password)
+        print(f"Using provided credentials for user: {args.username}")
 
     # Output directory setup
     output_dir = Path("output")
@@ -80,9 +109,9 @@ async def main():
     run_directory = create_run_directory(output_dir, args.openapi_url)
 
     # ==================== Phase 1: Preliminary ====================
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("PHASE 1: Preliminary Analysis")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Analyzing OpenAPI spec at: {args.openapi_url}")
     if repo_path:
         print(f"Analyzing repository at: {repo_path}")
@@ -110,17 +139,20 @@ async def main():
 
     # Check if we have the OpenAPI spec for the next phases
     if not preliminary_result.openapi_spec:
-        print("\nWarning: No OpenAPI spec was fetched. Cannot proceed with data generation.")
+        print(
+            "\nWarning: No OpenAPI spec was fetched. Cannot proceed with data generation."
+        )
         return
 
     # ==================== Phase 2: Data Generation ====================
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("PHASE 2: Test Data Generation")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     test_data = await run_data_generation_phase(
         test_plan=preliminary_result.test_plan,
         openapi_spec=preliminary_result.openapi_spec,
+        credentials=credentials,
     )
 
     print("\n--- Generated Test Data ---")
@@ -134,14 +166,14 @@ async def main():
 
     # ==================== Phase 3: Test Execution ====================
     if args.skip_execution:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("PHASE 3: Test Execution (SKIPPED)")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         return
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("PHASE 3: Test Execution")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     execution_result = await run_test_execution_phase(
         test_plan=preliminary_result.test_plan,
@@ -157,7 +189,9 @@ async def main():
     # Print individual results
     for result in execution_result.results:
         status = "✓" if result.success else "✗"
-        print(f"  {status} {result.step_id}: {result.status_code or 'N/A'} (expected {result.expected_status})")
+        print(
+            f"  {status} {result.step_id}: {result.status_code or 'N/A'} (expected {result.expected_status})"
+        )
         if result.error:
             print(f"      Error: {result.error}")
 
