@@ -1,8 +1,10 @@
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
 import httpx
 import re
+import time
 from pydantic import BaseModel, Field
 
 from ..models import TestPlan, TestStep, BodyFormat, AuthRequirement
@@ -17,6 +19,7 @@ class StepResult(BaseModel):
     status_code: int | None = None
     expected_status: int
     response_body: Any = None
+    response_headers: dict[str, Any] | None = None
     error: str | None = None
     duration_ms: float = 0
     auth_token_extracted: str | None = None  # Token if this was an auth provider step
@@ -213,9 +216,7 @@ async def execute_step(
     ctx: ExecutionContext,
 ) -> StepResult:
     """Execute a single test step."""
-    import time
-
-    start_time = time.time()
+    start_time = time.perf_counter()
 
     try:
         # Resolve any placeholders in the payload
@@ -269,7 +270,7 @@ async def execute_step(
 
         response = await ctx.http_client.request(**request_kwargs)
 
-        duration_ms = (time.time() - start_time) * 1000
+        duration_ms = (time.perf_counter() - start_time) * 1000
 
         # Try to parse response as JSON
         try:
@@ -300,17 +301,18 @@ async def execute_step(
             status_code=response.status_code,
             expected_status=step.expected_status,
             response_body=response_body,
+            response_headers=dict(response.headers),
             duration_ms=duration_ms,
             auth_token_extracted=auth_token,
         )
 
     except Exception as e:
-        duration_ms = (time.time() - start_time) * 1000
+        duration_ms = (time.perf_counter() - start_time) * 1000
         return StepResult(
             step_id=step.id,
             success=False,
             expected_status=step.expected_status,
-            error=str(e),
+            error=f"{e.__class__.__name__}: {e}",
             duration_ms=duration_ms,
         )
 
@@ -321,29 +323,40 @@ def get_execution_order(steps: list[TestStep]) -> list[list[TestStep]]:
     Returns a list of batches, where each batch can be executed in parallel.
     """
     step_map = {step.id: step for step in steps}
-    completed = set()
-    batches = []
-    remaining = set(step.id for step in steps)
+    step_ids = set(step_map.keys())
+    missing = {
+        dep for step in steps for dep in step.depends_on if dep not in step_ids
+    }
+    if missing:
+        missing_list = ", ".join(sorted(missing))
+        raise ValueError(f"Missing dependencies in test plan: {missing_list}")
 
-    while remaining:
-        # Find steps whose dependencies are all completed
-        batch = []
-        for step_id in list(remaining):
-            step = step_map[step_id]
-            if all(dep in completed for dep in step.depends_on):
-                batch.append(step)
+    indegree: dict[str, int] = {step_id: 0 for step_id in step_ids}
+    adjacency: dict[str, list[str]] = defaultdict(list)
 
-        if not batch:
-            # Circular dependency or missing dependency - add remaining as final batch
-            batch = [step_map[step_id] for step_id in remaining]
-            batches.append(batch)
-            break
+    for step in steps:
+        for dep in step.depends_on:
+            adjacency[dep].append(step.id)
+            indegree[step.id] += 1
 
-        for step in batch:
-            remaining.remove(step.id)
-            completed.add(step.id)
+    queue: deque[str] = deque([sid for sid, deg in indegree.items() if deg == 0])
+    batches: list[list[TestStep]] = []
+    processed = 0
 
-        batches.append(batch)
+    while queue:
+        batch_size = len(queue)
+        batch_ids = [queue.popleft() for _ in range(batch_size)]
+        batches.append([step_map[sid] for sid in batch_ids])
+        processed += batch_size
+
+        for sid in batch_ids:
+            for neighbor in adjacency.get(sid, []):
+                indegree[neighbor] -= 1
+                if indegree[neighbor] == 0:
+                    queue.append(neighbor)
+
+    if processed != len(steps):
+        raise ValueError("Circular dependencies detected in test plan")
 
     return batches
 
@@ -377,7 +390,25 @@ async def run_test_execution_phase(
         skipped = 0
 
         # Get execution order (batches of steps that can run in parallel)
-        batches = get_execution_order(test_plan.steps)
+        try:
+            batches = get_execution_order(test_plan.steps)
+        except ValueError as err:
+            error_message = str(err)
+            return TestExecutionResult(
+                total_steps=len(test_plan.steps),
+                passed=0,
+                failed=len(test_plan.steps),
+                skipped=0,
+                results=[
+                    StepResult(
+                        step_id=step.id,
+                        success=False,
+                        expected_status=step.expected_status,
+                        error=error_message,
+                    )
+                    for step in test_plan.steps
+                ],
+            )
 
         for batch in batches:
             # Execute batch (could be parallelized, but running sequentially for now for simpler debugging)
