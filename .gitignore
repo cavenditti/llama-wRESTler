@@ -10,9 +10,12 @@ wheels/
 .venv
 
 # Config env files
-.env.
+.env
+.env.*
 .*.env
 .*.env.*
+
+.credentials.json
 
 # Output
 output/
