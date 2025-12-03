@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 import json
 import logging
@@ -658,6 +659,7 @@ async def run_data_generation_phase(
     use_llm: bool = True,
     per_step: bool = True,
     seed: int | str | None = None,
+    max_concurrent: int | None = None,
 ) -> GeneratedTestData:
     """
     Run the data generation phase: generate mock data for all test steps.
@@ -670,6 +672,8 @@ async def run_data_generation_phase(
         per_step: If True and use_llm=True, generate data per-step with weak model (default).
                   If False and use_llm=True, generate all data in one bulk request with strong model.
         seed: Optional seed for deterministic generation (only used when use_llm=False)
+        max_concurrent: Maximum number of concurrent LLM requests (None = unlimited).
+                        Use this to throttle API calls and avoid rate limiting.
 
     Returns:
         GeneratedTestData containing mock payloads for each test step
@@ -683,11 +687,12 @@ async def run_data_generation_phase(
         )
 
     if per_step:
-        # Per-step generation with weak model
+        # Per-step generation with weak model (parallel)
         return await _run_per_step_generation(
             test_plan=test_plan,
             openapi_spec=openapi_spec,
             credentials=credentials,
+            max_concurrent=max_concurrent,
         )
 
     # Bulk generation with strong model (legacy mode)
@@ -702,19 +707,29 @@ async def _run_per_step_generation(
     test_plan: APIPlan,
     openapi_spec: dict,
     credentials: APICredentials | None = None,
+    max_concurrent: int | None = None,
 ) -> GeneratedTestData:
     """
-    Generate test data one step at a time using the weak model.
+    Generate test data for all steps in parallel using the weak model.
 
-    This approach is more reliable for large test plans because:
+    This approach is fast and reliable:
     1. Each request is small and focused
-    2. Less likely to hit token limits or timeouts
-    3. Easier to debug individual step failures
+    2. Requests run in parallel for speed
+    3. Optional throttling via max_concurrent
     4. Guarantees one payload per step (with fallback on failure)
+
+    Args:
+        test_plan: The test plan
+        openapi_spec: The OpenAPI specification
+        credentials: Optional credentials
+        max_concurrent: Max parallel requests (None = unlimited)
     """
-    payloads: list[MockedPayload] = []
-    previous_step_ids: list[str] = []
-    failed_step_ids: list[str] = []
+    total_steps = len(test_plan.steps)
+    logger.info(
+        "Generating data for %d steps in parallel (max_concurrent=%s)",
+        total_steps,
+        max_concurrent or "unlimited",
+    )
 
     # Find the first auth provider step for use in subsequent steps
     auth_provider_step_id: str | None = None
@@ -723,54 +738,75 @@ async def _run_per_step_generation(
             auth_provider_step_id = step.id
             break
 
-    total_steps = len(test_plan.steps)
+    # Build list of all step IDs for placeholder context
+    all_step_ids = [step.id for step in test_plan.steps]
 
-    for i, step in enumerate(test_plan.steps, 1):
-        logger.info("Generating data for step %d/%d: %s", i, total_steps, step.id)
+    # Create semaphore for throttling (if specified)
+    semaphore = asyncio.Semaphore(max_concurrent) if max_concurrent else None
 
-        # Find the auth provider for this specific step (from its dependencies)
-        step_auth_provider = _find_auth_provider_step(
-            step.id, test_plan, step.depends_on
-        )
-        if step_auth_provider is None:
-            step_auth_provider = auth_provider_step_id
-
-        try:
-            payload = await _generate_single_step_data(
-                step=step,
-                openapi_spec=openapi_spec,
-                credentials=credentials,
-                previous_step_ids=previous_step_ids.copy(),
-                auth_provider_step_id=step_auth_provider,
+    async def generate_with_throttle(step: APIStep, index: int) -> MockedPayload:
+        """Generate data for a single step, with optional throttling."""
+        async def _generate() -> MockedPayload:
+            # Find the auth provider for this specific step
+            step_auth_provider = _find_auth_provider_step(
+                step.id, test_plan, step.depends_on
             )
-            payloads.append(payload)
-        except Exception as e:
-            logger.error("Failed to generate data for step %s: %s", step.id, e)
-            failed_step_ids.append(step.id)
-            # Create a minimal fallback payload
-            payloads.append(
-                MockedPayload(
+            if step_auth_provider is None:
+                step_auth_provider = auth_provider_step_id
+
+            # Use all previous step IDs as context for placeholders
+            previous_ids = all_step_ids[:index]
+
+            try:
+                logger.debug("Generating data for step %d/%d: %s", index + 1, total_steps, step.id)
+                payload = await _generate_single_step_data(
+                    step=step,
+                    openapi_spec=openapi_spec,
+                    credentials=credentials,
+                    previous_step_ids=previous_ids,
+                    auth_provider_step_id=step_auth_provider,
+                )
+                logger.debug("Completed step %d/%d: %s", index + 1, total_steps, step.id)
+                return payload
+            except Exception as e:
+                logger.error("Failed to generate data for step %s: %s", step.id, e)
+                # Return fallback payload
+                return MockedPayload(
                     step_id=step.id,
                     request_body=None,
                     path_params={},
                     query_params={},
                     headers={},
                 )
-            )
 
-        previous_step_ids.append(step.id)
+        if semaphore:
+            async with semaphore:
+                return await _generate()
+        else:
+            return await _generate()
 
-    # Log final status
-    if failed_step_ids:
+    # Run all generations in parallel
+    tasks = [
+        generate_with_throttle(step, i)
+        for i, step in enumerate(test_plan.steps)
+    ]
+    payloads = await asyncio.gather(*tasks)
+
+    # Count failures (payloads with empty request_body where one was expected)
+    failed_count = sum(
+        1 for p, s in zip(payloads, test_plan.steps)
+        if p.request_body is None and s.method in ("POST", "PUT", "PATCH")
+    )
+
+    if failed_count > 0:
         logger.warning(
-            "Failed to generate proper data for %d step(s) (using fallback): %s",
-            len(failed_step_ids),
-            failed_step_ids,
+            "Failed to generate proper data for %d step(s) (using fallback)",
+            failed_count,
         )
     else:
         logger.info("Successfully generated data for all %d step(s)", total_steps)
 
-    return GeneratedTestData(payloads=payloads)
+    return GeneratedTestData(payloads=list(payloads))
 
 
 async def _run_bulk_generation(

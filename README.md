@@ -57,6 +57,10 @@ OPENAI_MODEL=gpt-4o
 
 # Optional: Weaker/cheaper model for per-step data generation (default: gpt-4o-mini)
 OPENAI_WEAK_MODEL=gpt-4o-mini
+
+# Optional: Max concurrent LLM requests for parallel data generation (default: unlimited)
+# Set this to avoid rate limiting, e.g., 5 or 10
+MAX_CONCURRENT_REQUESTS=10
 ```
 
 ## 📖 Usage

@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     openai_weak_model: str = (
         "gpt-4o-mini"  # Weaker/cheaper model for per-step data generation
     )
+    max_concurrent_requests: int | None = None  # Max parallel LLM requests (None = unlimited)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
