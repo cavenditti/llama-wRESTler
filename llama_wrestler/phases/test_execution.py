@@ -49,8 +49,10 @@ class HTTPTrafficLog(BaseModel):
     def save(self, output_dir: Path) -> Path:
         """Save the traffic log to a file."""
         self.completed_at = datetime.now().isoformat()
+        traffic_dir = output_dir / "http_traffic"
+        traffic_dir.mkdir(exist_ok=True)
         iter_suffix = f"_iter{self.iteration}" if self.iteration else ""
-        filename = output_dir / f"http_traffic{iter_suffix}.json"
+        filename = traffic_dir / f"http_traffic{iter_suffix}.json"
         with open(filename, "w") as f:
             f.write(self.model_dump_json(indent=2))
         return filename

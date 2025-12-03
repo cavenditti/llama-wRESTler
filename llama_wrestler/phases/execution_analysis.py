@@ -410,9 +410,11 @@ Provide:
         
         # Save request for analysis
         if output_dir:
+            recaps_dir = output_dir / "recaps"
+            recaps_dir.mkdir(exist_ok=True)
             iter_suffix = f"_iter{iteration}" if iteration else ""
             timestamp = datetime.now().strftime("%H%M%S")
-            request_file = output_dir / f"recap_batch{batch_num}_request{iter_suffix}_{timestamp}.md"
+            request_file = recaps_dir / f"recap_batch{batch_num}_request{iter_suffix}_{timestamp}.md"
             with open(request_file, "w") as f:
                 f.write(f"# Recap Batch {batch_num} Request\n")
                 f.write(f"Generated at: {datetime.now().isoformat()}\n\n")
@@ -426,7 +428,7 @@ Provide:
             
             # Save response for analysis
             if output_dir:
-                response_file = output_dir / f"recap_batch{batch_num}_response{iter_suffix}_{timestamp}.json"
+                response_file = recaps_dir / f"recap_batch{batch_num}_response{iter_suffix}_{timestamp}.json"
                 with open(response_file, "w") as f:
                     json.dump(result.output.model_dump(), f, indent=2)
                 logger.info("Saved recap batch %d response to %s", batch_num, response_file)
@@ -466,8 +468,10 @@ Provide:
     )
     
     if output_dir:
+        recaps_dir = output_dir / "recaps"
+        recaps_dir.mkdir(exist_ok=True)
         iter_suffix = f"_iter{iteration}" if iteration else ""
-        recap_file = output_dir / f"full_recap{iter_suffix}.json"
+        recap_file = recaps_dir / f"full_recap{iter_suffix}.json"
         with open(recap_file, "w") as f:
             json.dump(full_recap.model_dump(), f, indent=2)
         logger.info("Saved full recap to %s", recap_file)

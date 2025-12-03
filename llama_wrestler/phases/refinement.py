@@ -746,11 +746,13 @@ REMEMBER: Check the "Previous Fix Attempts" sections for each step. DO NOT repea
     
     # Save request and response for analysis
     if output_dir:
+        recaps_dir = output_dir / "recaps"
+        recaps_dir.mkdir(exist_ok=True)
         iter_suffix = f"_iter{iteration}" if iteration else ""
         timestamp = datetime.now().strftime("%H%M%S")
         
         # Save the full prompt (request)
-        request_file = output_dir / f"refinement_request{iter_suffix}_{timestamp}.md"
+        request_file = recaps_dir / f"refinement_request{iter_suffix}_{timestamp}.md"
         request_content = f"""# Refinement Request
 Generated at: {datetime.now().isoformat()}
 Iteration: {iteration or 'N/A'}
@@ -776,7 +778,7 @@ Iteration: {iteration or 'N/A'}
         logger.info("Saved refinement request to %s", request_file)
         
         # Save the response
-        response_file = output_dir / f"refinement_response{iter_suffix}_{timestamp}.json"
+        response_file = recaps_dir / f"refinement_response{iter_suffix}_{timestamp}.json"
         response_data = {
             "timestamp": datetime.now().isoformat(),
             "iteration": iteration,
