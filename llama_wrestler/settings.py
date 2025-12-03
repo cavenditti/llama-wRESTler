@@ -4,7 +4,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     openai_api_key: str
     openai_base_url: str | None = None
-    openai_model: str = "gpt-4o"  # Used for test plan generation (preliminary phase)
+    openai_model: str = "gpt-4o"  # Used for test plan generation and refinement
+    openai_weak_model: str = "gpt-4o-mini"  # Used for summarization/recap tasks
 
     model_config = SettingsConfigDict(
         env_file=".env",

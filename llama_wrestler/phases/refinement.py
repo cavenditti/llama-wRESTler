@@ -10,6 +10,8 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -34,8 +36,21 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class FixAttempt:
+    """Record of a single fix attempt for a step."""
+    
+    iteration: int
+    payload: MockedPayload | None
+    reasoning: str  # The model's reasoning for this fix
+    error_before: str | None  # Error that prompted this fix
+    error_after: str | None  # Error after applying this fix (None if succeeded)
+    status_code: int | None  # Status code received
+    succeeded: bool
+
+
+@dataclass
 class IterationHistory:
-    """Tracks step results and payloads across iterations for regression detection."""
+    """Tracks step results, payloads, and fix attempts across iterations for learning."""
 
     # step_id -> list of (success, payload) for each iteration
     step_history: dict[str, list[tuple[bool, MockedPayload | None]]] = field(
@@ -43,6 +58,10 @@ class IterationHistory:
     )
     # step_id -> last known working payload
     last_working_payloads: dict[str, MockedPayload] = field(default_factory=dict)
+    # step_id -> list of fix attempts with full context
+    fix_attempts: dict[str, list[FixAttempt]] = field(default_factory=dict)
+    # Current iteration number
+    current_iteration: int = 0
 
     def record_iteration(
         self,
@@ -50,6 +69,7 @@ class IterationHistory:
         test_data: GeneratedTestData,
     ) -> None:
         """Record results from an iteration."""
+        self.current_iteration += 1
         payload_map = {p.step_id: p for p in test_data.payloads}
         result_map = {r.step_id: r for r in execution_result.results}
 
@@ -64,6 +84,71 @@ class IterationHistory:
             # Track last working payload
             if result.success and payload:
                 self.last_working_payloads[step_id] = payload
+
+    def record_fix_attempt(
+        self,
+        step_id: str,
+        payload: MockedPayload | None,
+        reasoning: str,
+        error_before: str | None,
+    ) -> None:
+        """Record a fix attempt before execution (error_after will be updated later)."""
+        if step_id not in self.fix_attempts:
+            self.fix_attempts[step_id] = []
+        
+        self.fix_attempts[step_id].append(FixAttempt(
+            iteration=self.current_iteration,
+            payload=payload,
+            reasoning=reasoning,
+            error_before=error_before,
+            error_after=None,  # Will be updated after execution
+            status_code=None,
+            succeeded=False,
+        ))
+
+    def update_fix_result(
+        self,
+        step_id: str,
+        error_after: str | None,
+        status_code: int | None,
+        succeeded: bool,
+    ) -> None:
+        """Update the most recent fix attempt with its result."""
+        if step_id in self.fix_attempts and self.fix_attempts[step_id]:
+            latest = self.fix_attempts[step_id][-1]
+            latest.error_after = error_after
+            latest.status_code = status_code
+            latest.succeeded = succeeded
+
+    def get_failed_attempts(self, step_id: str) -> list[FixAttempt]:
+        """Get all failed fix attempts for a step."""
+        if step_id not in self.fix_attempts:
+            return []
+        return [a for a in self.fix_attempts[step_id] if not a.succeeded]
+
+    def get_attempt_summary(self, step_id: str) -> str | None:
+        """Get a summary of previous fix attempts for a step, for LLM context."""
+        attempts = self.get_failed_attempts(step_id)
+        if not attempts:
+            return None
+        
+        parts = [f"### Previous Fix Attempts for {step_id} (all failed):"]
+        for i, attempt in enumerate(attempts, 1):
+            parts.append(f"\n**Attempt {i} (iteration {attempt.iteration}):**")
+            parts.append(f"- Reasoning: {attempt.reasoning}")
+            if attempt.error_before:
+                parts.append(f"- Error that prompted fix: {attempt.error_before}")
+            if attempt.error_after:
+                parts.append(f"- Result: Failed with error: {attempt.error_after}")
+            if attempt.status_code:
+                parts.append(f"- Status code: {attempt.status_code}")
+            if attempt.payload:
+                import json
+                body_preview = json.dumps(attempt.payload.request_body)[:200]
+                parts.append(f"- Payload tried: {body_preview}...")
+        
+        parts.append("\n**⚠️ DO NOT repeat these same fixes. Try a different approach.**")
+        return "\n".join(parts)
 
     def get_regressions(self) -> list[str]:
         """Get step IDs that regressed (were passing but now failing)."""
@@ -84,6 +169,13 @@ class IterationHistory:
             for step_id in regressions
             if step_id in self.last_working_payloads
         }
+    
+    def get_steps_with_multiple_failures(self, min_attempts: int = 2) -> list[str]:
+        """Get step IDs that have failed multiple fix attempts."""
+        return [
+            step_id for step_id, attempts in self.fix_attempts.items()
+            if len([a for a in attempts if not a.succeeded]) >= min_attempts
+        ]
 
 
 class RefinedPayload(BaseModel):
@@ -122,6 +214,16 @@ class RefinedStep(BaseModel):
     )
 
 
+class UnfixableStep(BaseModel):
+    """A step that cannot be fixed through payload refinement."""
+    
+    step_id: str = Field(description="The step ID that cannot be fixed")
+    reason: str = Field(description="Why this step cannot be fixed")
+    category: str = Field(
+        description="Category: 'server_error', 'missing_dependency', 'auth_issue', 'endpoint_broken', 'other'"
+    )
+
+
 class RefinementResult(BaseModel):
     """Result of the refinement phase."""
 
@@ -130,6 +232,10 @@ class RefinementResult(BaseModel):
     )
     refined_steps: list[RefinedStep] = Field(
         default_factory=list, description="List of refined test step definitions"
+    )
+    unfixable_steps: list[UnfixableStep] = Field(
+        default_factory=list, 
+        description="Steps that cannot be fixed and should be skipped in future iterations"
     )
     analysis_summary: str = Field(
         description="Summary of failure analysis and fixes applied"
@@ -241,11 +347,23 @@ You will receive:
 2. The original payloads that were used
 3. The error responses and status codes received
 4. The OpenAPI specification for reference
+5. **IMPORTANT**: Previous fix attempts that already failed (if any)
 
 Your task is to:
 1. Analyze WHY each test failed (wrong data format, missing required fields, invalid values, etc.)
-2. Generate CORRECTED payloads that should succeed
-3. Explain your reasoning for each fix
+2. **Check previous fix attempts** - DO NOT repeat fixes that already failed
+3. Generate CORRECTED payloads using a DIFFERENT approach than previous attempts
+4. Explain your reasoning for each fix, noting how it differs from past attempts
+
+LEARNING FROM PREVIOUS ATTEMPTS:
+- If you see "Previous Fix Attempts" for a step, those fixes DID NOT WORK
+- Analyze WHY those attempts failed before proposing a new fix
+- Try a fundamentally different approach, not just minor variations
+- If multiple attempts have failed, consider:
+  * The error might be server-side (unfixable from client)
+  * A dependency step needs to succeed first
+  * The expected_status in the test plan might be wrong
+  * The endpoint might require different auth or permissions
 
 COMMON FAILURE PATTERNS:
 
@@ -320,6 +438,25 @@ IMPORTANT: Only include refined_steps when the TEST PLAN is wrong, not the paylo
 For example, if a test expects status 200 but the correct response is 201, add a refined_step.
 If auth is required but the step has auth_requirement=none, add a refined_step.
 If a step has invalid dependencies that don't exist, add a refined_step with corrected depends_on.
+
+UNFIXABLE STEPS (unfixable_steps):
+If after analyzing a step you determine it CANNOT be fixed through payload changes, include it in unfixable_steps:
+- step_id: The step identifier
+- reason: Detailed explanation of why it cannot be fixed
+- category: One of:
+  * 'server_error': Server returns 500 consistently, likely a backend bug
+  * 'missing_dependency': Requires a prerequisite step that doesn't exist in the test plan
+  * 'auth_issue': Requires permissions/roles we don't have
+  * 'endpoint_broken': Endpoint doesn't work as documented
+  * 'other': Other unfixable issues
+
+Mark a step as unfixable when:
+- It has failed 3+ times with the same or similar errors
+- Server consistently returns 500 regardless of payload
+- It depends on data that no test step can create
+- The OpenAPI spec appears incorrect or incomplete
+
+DO NOT mark a step unfixable just because your first fix didn't work. Only use this after genuine analysis shows no client-side fix is possible.
 """
 
 
@@ -373,6 +510,7 @@ def _build_failure_context(
     test_data: GeneratedTestData,
     openapi_spec: dict,
     steps_with_broken_deps: list[tuple[APIStep, list[str]]] | None = None,
+    history: "IterationHistory | None" = None,
 ) -> str:
     """Build a detailed context string for the LLM about failures.
 
@@ -381,6 +519,7 @@ def _build_failure_context(
         test_data: The test data used
         openapi_spec: The OpenAPI specification
         steps_with_broken_deps: Optional list of (step, removed_dep_ids) for steps with invalid dependencies
+        history: Optional iteration history with previous fix attempts
     """
     payload_map = {p.step_id: p for p in test_data.payloads}
     paths = openapi_spec.get("paths", {})
@@ -392,6 +531,18 @@ def _build_failure_context(
         definitions = openapi_spec.get("components", {}).get("schemas", {})
 
     parts = ["# Failed Test Steps Analysis\n"]
+    
+    # Add summary of steps with multiple failed attempts
+    if history:
+        multi_failure_steps = history.get_steps_with_multiple_failures(min_attempts=2)
+        if multi_failure_steps:
+            parts.append("\n## ⚠️ Steps with Multiple Failed Fix Attempts\n")
+            parts.append("The following steps have had multiple fix attempts that all failed.")
+            parts.append("Consider whether these might be UNFIXABLE and should be marked as such.\n")
+            for step_id in multi_failure_steps:
+                attempt_count = len(history.get_failed_attempts(step_id))
+                parts.append(f"- **{step_id}**: {attempt_count} failed attempts")
+            parts.append("\n---\n")
 
     # Add section for steps with broken dependencies
     if steps_with_broken_deps:
@@ -427,6 +578,12 @@ def _build_failure_context(
         parts.append(f"- Expected Status: {step.expected_status}")
         parts.append(f"- Actual Status: {result.status_code}")
         parts.append(f"- Error: {result.error or 'None'}")
+        
+        # Add previous fix attempts for this step
+        if history:
+            attempt_summary = history.get_attempt_summary(step.id)
+            if attempt_summary:
+                parts.append(f"\n{attempt_summary}")
 
         if result.response_body:
             try:
@@ -473,6 +630,9 @@ async def run_refinement_phase(
     execution_result: APIExecutionResult,
     test_data: GeneratedTestData,
     history: IterationHistory | None = None,
+    pre_analysis_recap: str | None = None,
+    output_dir: "Path | None" = None,
+    iteration: int | None = None,
 ) -> tuple[APIPlan, GeneratedTestData, RefinementResult]:
     """
     Run the refinement phase to fix failed test payloads and test plan.
@@ -483,6 +643,9 @@ async def run_refinement_phase(
         execution_result: Results from test execution
         test_data: The current test data that was used
         history: Optional iteration history for regression detection
+        pre_analysis_recap: Optional pre-analysis from weak model (from multi-run execution)
+        output_dir: Optional directory to save request/response for analysis
+        iteration: Optional iteration number for file naming
 
     Returns:
         Tuple of (updated APIPlan, updated GeneratedTestData, RefinementResult with analysis)
@@ -526,10 +689,27 @@ async def run_refinement_phase(
         len(broken_dep_step_ids),
     )
 
-    # Build context for the LLM
+    # Build context for the LLM, including previous fix attempts
     failure_context = _build_failure_context(
-        failed_step_results, test_data, openapi_spec, steps_with_broken_deps
+        failed_step_results, test_data, openapi_spec, steps_with_broken_deps, history
     )
+    
+    # Build context about steps with many failed attempts
+    learning_context = ""
+    if history:
+        multi_failure_steps = history.get_steps_with_multiple_failures(min_attempts=3)
+        if multi_failure_steps:
+            learning_context = f"""
+## ⚠️ ATTENTION: Steps with 3+ Failed Fix Attempts
+
+The following steps have been attempted multiple times without success.
+Consider marking them as UNFIXABLE if you cannot identify a new approach:
+{', '.join(multi_failure_steps)}
+
+For these steps, you should either:
+1. Propose a FUNDAMENTALLY DIFFERENT fix (not a minor variation)
+2. Add them to unfixable_steps if no client-side fix is possible
+"""
 
     # Create and run the agent
     agent = _create_refinement_agent()
@@ -543,6 +723,10 @@ async def run_refinement_phase(
 
     prompt = f"""Analyze the following failed test steps and generate corrected payloads.
 
+{pre_analysis_recap if pre_analysis_recap else ""}
+
+{learning_context}
+
 {failure_context}
 
 Generate refined payloads for these failed steps: {failed_step_ids}
@@ -550,17 +734,86 @@ Generate refined payloads for these failed steps: {failed_step_ids}
 {"IMPORTANT: The following steps have INVALID DEPENDENCIES that reference non-existent steps: " + str(broken_dep_step_ids) + ". You MUST include these in refined_steps with corrected depends_on values (either fix the dependency IDs or set to empty list if no valid dependency exists)." if broken_dep_step_ids else ""}
 
 Focus on fixing the root causes of the failures based on the error responses and OpenAPI schema.
+{"Use the pre-analysis summary above to guide your fixes - it contains insights from analyzing multiple execution runs." if pre_analysis_recap else ""}
 If the test plan step definition itself is wrong (wrong expected_status, missing auth_requirement, wrong depends_on, etc.),
 also include entries in refined_steps.
+
+REMEMBER: Check the "Previous Fix Attempts" sections for each step. DO NOT repeat fixes that already failed!
 """
 
     result = await agent.run(prompt, deps=deps)
     refinement_result = result.output
+    
+    # Save request and response for analysis
+    if output_dir:
+        iter_suffix = f"_iter{iteration}" if iteration else ""
+        timestamp = datetime.now().strftime("%H%M%S")
+        
+        # Save the full prompt (request)
+        request_file = output_dir / f"refinement_request{iter_suffix}_{timestamp}.md"
+        request_content = f"""# Refinement Request
+Generated at: {datetime.now().isoformat()}
+Iteration: {iteration or 'N/A'}
+
+## System Prompt
+```
+{REFINEMENT_SYSTEM_PROMPT}
+```
+
+## User Prompt
+```
+{prompt}
+```
+
+## Failed Step IDs
+{failed_step_ids}
+
+## Broken Dependency Step IDs
+{broken_dep_step_ids if broken_dep_step_ids else 'None'}
+"""
+        with open(request_file, "w") as f:
+            f.write(request_content)
+        logger.info("Saved refinement request to %s", request_file)
+        
+        # Save the response
+        response_file = output_dir / f"refinement_response{iter_suffix}_{timestamp}.json"
+        response_data = {
+            "timestamp": datetime.now().isoformat(),
+            "iteration": iteration,
+            "analysis_summary": refinement_result.analysis_summary,
+            "refined_payloads": [p.model_dump() for p in refinement_result.refined_payloads],
+            "refined_steps": [s.model_dump() for s in refinement_result.refined_steps],
+            "unfixable_steps": [u.model_dump() for u in refinement_result.unfixable_steps],
+        }
+        with open(response_file, "w") as f:
+            json.dump(response_data, f, indent=2)
+        logger.info("Saved refinement response to %s", response_file)
+    
+    # Record fix attempts in history for future iterations
+    if history:
+        # Get the error for each failed step
+        result_map = {r.step_id: r for r in execution_result.results}
+        for refined in refinement_result.refined_payloads:
+            step_result = result_map.get(refined.step_id)
+            error_before = step_result.error if step_result else None
+            history.record_fix_attempt(
+                step_id=refined.step_id,
+                payload=MockedPayload(
+                    step_id=refined.step_id,
+                    request_body=refined.request_body,
+                    path_params=refined.path_params,
+                    query_params=refined.query_params,
+                    headers=refined.headers,
+                ),
+                reasoning=refined.reasoning,
+                error_before=error_before,
+            )
 
     logger.info(
-        "Refinement complete: %d payloads refined, %d steps refined",
+        "Refinement complete: %d payloads refined, %d steps refined, %d marked unfixable",
         len(refinement_result.refined_payloads),
         len(refinement_result.refined_steps),
+        len(refinement_result.unfixable_steps),
     )
 
     # Apply test plan refinements
@@ -670,3 +923,32 @@ def calculate_pass_rate(execution_result: APIExecutionResult) -> float:
     if execution_result.total_steps == 0:
         return 0.0
     return (execution_result.passed / execution_result.total_steps) * 100
+
+
+def update_fix_results_from_execution(
+    history: IterationHistory,
+    execution_result: APIExecutionResult,
+) -> None:
+    """
+    Update the history with results from the latest execution.
+    
+    This should be called after re-executing tests to record whether
+    the fix attempts succeeded or failed.
+    
+    Args:
+        history: The iteration history to update
+        execution_result: Results from the latest test execution
+    """
+    result_map = {r.step_id: r for r in execution_result.results}
+    
+    for step_id in history.fix_attempts:
+        if step_id not in result_map:
+            continue
+        
+        step_result = result_map[step_id]
+        history.update_fix_result(
+            step_id=step_id,
+            error_after=step_result.error if not step_result.success else None,
+            status_code=step_result.status_code,
+            succeeded=step_result.success,
+        )

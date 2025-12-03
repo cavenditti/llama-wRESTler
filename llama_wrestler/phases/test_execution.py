@@ -1,6 +1,9 @@
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from datetime import datetime
+import json
 import logging
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 import httpx
@@ -17,6 +20,40 @@ from llama_wrestler.schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class HTTPLogEntry(BaseModel):
+    """A single HTTP request/response log entry."""
+    
+    timestamp: str
+    step_id: str
+    request: dict[str, Any] = Field(default_factory=dict)
+    response: dict[str, Any] = Field(default_factory=dict)
+    duration_ms: float = 0
+    success: bool = False
+    error: str | None = None
+
+
+class HTTPTrafficLog(BaseModel):
+    """Log of all HTTP traffic during test execution."""
+    
+    run_id: str
+    iteration: int | None = None
+    started_at: str
+    completed_at: str | None = None
+    entries: list[HTTPLogEntry] = Field(default_factory=list)
+    
+    def add_entry(self, entry: HTTPLogEntry) -> None:
+        self.entries.append(entry)
+    
+    def save(self, output_dir: Path) -> Path:
+        """Save the traffic log to a file."""
+        self.completed_at = datetime.now().isoformat()
+        iter_suffix = f"_iter{self.iteration}" if self.iteration else ""
+        filename = output_dir / f"http_traffic{iter_suffix}.json"
+        with open(filename, "w") as f:
+            f.write(self.model_dump_json(indent=2))
+        return filename
 
 
 class StepResult(BaseModel):
@@ -62,6 +99,7 @@ class ExecutionContext:
     validator: RequestResponseValidator | None = (
         None  # Optional validator for OpenAPI validation
     )
+    traffic_log: HTTPTrafficLog | None = None  # Optional traffic logging
 
 
 @dataclass
@@ -238,6 +276,10 @@ async def execute_step(
 ) -> StepResult:
     """Execute a single test step."""
     start_time = time.perf_counter()
+    
+    # Prepare log entry data
+    log_request: dict[str, Any] = {}
+    log_response: dict[str, Any] = {}
 
     try:
         # Resolve any placeholders in the payload
@@ -289,6 +331,18 @@ async def execute_step(
         if prepared_body.content is not None:
             request_kwargs["content"] = prepared_body.content
 
+        # Log the request
+        log_request = {
+            "method": step.method,
+            "url": url,
+            "endpoint": step.endpoint,
+            "path_params": path_params,
+            "query_params": query_params,
+            "headers": _sanitize_headers_for_log(final_headers),
+            "body": request_body,
+            "body_format": step.body_format.value if step.body_format else None,
+        }
+
         response = await ctx.http_client.request(**request_kwargs)
 
         duration_ms = (time.perf_counter() - start_time) * 1000
@@ -298,6 +352,13 @@ async def execute_step(
             response_body = response.json()
         except Exception:
             response_body = response.text
+
+        # Log the response
+        log_response = {
+            "status_code": response.status_code,
+            "headers": dict(response.headers),
+            "body": response_body,
+        }
 
         # Store response for dependent steps
         ctx.step_responses[step.id] = response_body
@@ -329,6 +390,17 @@ async def execute_step(
                 ctx.auth_tokens[step.id] = auth_token
 
         success = response.status_code == step.expected_status
+        
+        # Add to traffic log if enabled
+        if ctx.traffic_log:
+            ctx.traffic_log.add_entry(HTTPLogEntry(
+                timestamp=datetime.now().isoformat(),
+                step_id=step.id,
+                request=log_request,
+                response=log_response,
+                duration_ms=duration_ms,
+                success=success,
+            ))
 
         return StepResult(
             step_id=step.id,
@@ -345,13 +417,45 @@ async def execute_step(
 
     except Exception as e:
         duration_ms = (time.perf_counter() - start_time) * 1000
+        error_msg = f"{e.__class__.__name__}: {e}"
+        
+        # Log failed request
+        if ctx.traffic_log:
+            ctx.traffic_log.add_entry(HTTPLogEntry(
+                timestamp=datetime.now().isoformat(),
+                step_id=step.id,
+                request=log_request,
+                response=log_response,
+                duration_ms=duration_ms,
+                success=False,
+                error=error_msg,
+            ))
+        
         return StepResult(
             step_id=step.id,
             success=False,
             expected_status=step.expected_status,
-            error=f"{e.__class__.__name__}: {e}",
+            error=error_msg,
             duration_ms=duration_ms,
         )
+
+
+def _sanitize_headers_for_log(headers: dict[str, str] | None) -> dict[str, str]:
+    """Sanitize headers for logging (mask sensitive values)."""
+    if not headers:
+        return {}
+    
+    sanitized = {}
+    for key, value in headers.items():
+        if key.lower() == "authorization":
+            # Show first/last few chars of token for debugging
+            if value and len(value) > 20:
+                sanitized[key] = f"{value[:15]}...{value[-5:]}"
+            else:
+                sanitized[key] = "***"
+        else:
+            sanitized[key] = value
+    return sanitized
 
 
 class DependencySanitizationResult(BaseModel):
@@ -464,6 +568,8 @@ async def run_test_execution_phase(
     test_data: GeneratedTestData,
     http_client: httpx.AsyncClient | None = None,
     openapi_spec: dict[str, Any] | None = None,
+    output_dir: Path | None = None,
+    iteration: int | None = None,
 ) -> APIExecutionResult:
     """
     Run the test execution phase: execute all test steps with the generated data.
@@ -473,6 +579,8 @@ async def run_test_execution_phase(
         test_data: The generated mock data for each step
         http_client: Optional HTTP client (will create one if not provided)
         openapi_spec: Optional OpenAPI specification for request/response validation
+        output_dir: Optional directory to save HTTP traffic log
+        iteration: Optional iteration number for file naming
 
     Returns:
         APIExecutionResult with results for all steps
@@ -486,12 +594,22 @@ async def run_test_execution_phase(
     if openapi_spec:
         parser = OpenAPISchemaParser(openapi_spec)
         validator = RequestResponseValidator(parser)
+    
+    # Create traffic log if output_dir is provided
+    traffic_log: HTTPTrafficLog | None = None
+    if output_dir:
+        traffic_log = HTTPTrafficLog(
+            run_id=output_dir.name,
+            iteration=iteration,
+            started_at=datetime.now().isoformat(),
+        )
 
     async def _run_with_client(client: httpx.AsyncClient) -> APIExecutionResult:
         ctx = ExecutionContext(
             http_client=client,
             base_url=test_plan.base_url,
             validator=validator,
+            traffic_log=traffic_log,
         )
 
         results: list[StepResult] = []
@@ -563,7 +681,14 @@ async def run_test_execution_phase(
         )
 
     if http_client:
-        return await _run_with_client(http_client)
+        result = await _run_with_client(http_client)
     else:
         async with httpx.AsyncClient() as client:
-            return await _run_with_client(client)
+            result = await _run_with_client(client)
+    
+    # Save traffic log if enabled
+    if traffic_log and output_dir:
+        log_file = traffic_log.save(output_dir)
+        logger.info("HTTP traffic log saved to %s", log_file)
+    
+    return result

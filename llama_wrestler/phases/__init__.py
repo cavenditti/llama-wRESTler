@@ -20,10 +20,13 @@ from llama_wrestler.phases.refinement import (
     RefinementResult,
     RefinedPayload,
     RefinedStep,
+    UnfixableStep,
     IterationHistory,
+    FixAttempt,
     fix_auth_requirements_from_spec,
     get_refinable_failure_count,
     calculate_pass_rate,
+    update_fix_results_from_execution,
 )
 from llama_wrestler.phases.step_classification import (
     classify_step,
@@ -33,6 +36,14 @@ from llama_wrestler.phases.step_classification import (
     ComplexityReason,
     ClassificationResult,
     StepClassification,
+)
+from llama_wrestler.phases.execution_analysis import (
+    run_multiple_executions,
+    generate_failure_recaps,
+    format_recap_for_refinement,
+    AggregatedExecutionResult,
+    FullAnalysisRecap,
+    StepExecutionStats,
 )
 
 __all__ = [
@@ -55,10 +66,13 @@ __all__ = [
     "RefinementResult",
     "RefinedPayload",
     "RefinedStep",
+    "UnfixableStep",
     "IterationHistory",
+    "FixAttempt",
     "fix_auth_requirements_from_spec",
     "get_refinable_failure_count",
     "calculate_pass_rate",
+    "update_fix_results_from_execution",
     # Step classification (for potential future use)
     "classify_step",
     "classify_steps",
@@ -67,4 +81,11 @@ __all__ = [
     "ComplexityReason",
     "ClassificationResult",
     "StepClassification",
+    # Execution analysis
+    "run_multiple_executions",
+    "generate_failure_recaps",
+    "format_recap_for_refinement",
+    "AggregatedExecutionResult",
+    "FullAnalysisRecap",
+    "StepExecutionStats",
 ]

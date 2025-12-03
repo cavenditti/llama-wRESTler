@@ -136,9 +136,9 @@ def find_best_versioned_file(directory: Path, prefix: str) -> Path | None:
     # 2. Check for {prefix}_iter*.json files (highest number first)
     iter_files = sorted(
         directory.glob(f"{prefix}_iter*.json"),
-        key=lambda p: int(re.search(r"iter(\d+)", p.name).group(1))
+        key=lambda p: int(re.search(r"iter(\d+)", p.name).group(1))  # type: ignore
         if re.search(r"iter(\d+)", p.name)
-        else -1,  # type: ignore
+        else -1,
         reverse=True,
     )
     if iter_files:
