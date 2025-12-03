@@ -358,36 +358,40 @@ async def run():
         # Multi-run execution and recap generation
         pre_analysis_recap = None
         if not args.no_multi_run and args.execution_runs > 1:
-            print(f"\nRunning {args.execution_runs} execution passes for stable failure detection...")
+            print(
+                f"\nRunning {args.execution_runs} execution passes for stable failure detection..."
+            )
             aggregated_result = await run_multiple_executions(
                 test_plan=test_plan,
                 test_data=test_data,
                 num_runs=args.execution_runs,
                 openapi_spec=openapi_spec,
             )
-            
+
             # Report aggregated statistics
             consistently_failing = aggregated_result.get_consistently_failing_steps()
             flaky_steps = aggregated_result.get_flaky_steps()
             consistently_passing = aggregated_result.get_consistently_passing_steps()
-            
+
             print(f"\nMulti-run Analysis ({args.execution_runs} runs):")
             print(f"  Consistently passing: {len(consistently_passing)}")
             print(f"  Consistently failing: {len(consistently_failing)}")
             print(f"  Flaky (inconsistent): {len(flaky_steps)}")
-            
+
             if flaky_steps:
                 print(f"  ⚠️ Flaky tests detected: {', '.join(flaky_steps[:5])}")
                 if len(flaky_steps) > 5:
                     print(f"      ... and {len(flaky_steps) - 5} more")
-            
+
             # Use consensus result for refinement
             if aggregated_result.consensus_result:
                 execution_result = aggregated_result.consensus_result
-            
+
             # Generate failure recaps using weak model
             if consistently_failing or flaky_steps:
-                print(f"\nGenerating failure analysis recaps (batch size: {args.recap_batch_size})...")
+                print(
+                    f"\nGenerating failure analysis recaps (batch size: {args.recap_batch_size})..."
+                )
                 recap = await generate_failure_recaps(
                     test_plan=test_plan,
                     aggregated_result=aggregated_result,
@@ -398,7 +402,7 @@ async def run():
                     iteration=iteration,
                 )
                 pre_analysis_recap = format_recap_for_refinement(recap)
-                
+
                 print("\nPre-Analysis Summary:")
                 print(f"  {recap.overall_summary}")
                 if recap.priority_fixes:
@@ -423,12 +427,16 @@ async def run():
         print(f"  {refinement_result.analysis_summary}")
         print(f"  Payloads refined: {len(refinement_result.refined_payloads)}")
         print(f"  Steps refined: {len(refinement_result.refined_steps)}")
-        
+
         # Report unfixable steps
         if refinement_result.unfixable_steps:
-            print(f"  ⛔ Steps marked unfixable: {len(refinement_result.unfixable_steps)}")
+            print(
+                f"  ⛔ Steps marked unfixable: {len(refinement_result.unfixable_steps)}"
+            )
             for unfixable in refinement_result.unfixable_steps:
-                print(f"      - {unfixable.step_id} ({unfixable.category}): {unfixable.reason[:60]}...")
+                print(
+                    f"      - {unfixable.step_id} ({unfixable.category}): {unfixable.reason[:60]}..."
+                )
 
         # Report steps with broken dependencies that need fixing
         if execution_result.steps_with_broken_deps:
@@ -444,7 +452,7 @@ async def run():
             print(f"  ⚠️ Regressions detected and reverted: {len(regressions)}")
             for step_id in regressions:
                 print(f"      - {step_id}")
-        
+
         # Report steps with multiple failed attempts
         multi_failure_steps = history.get_steps_with_multiple_failures(min_attempts=3)
         if multi_failure_steps:
@@ -483,7 +491,7 @@ async def run():
             output_dir=run_directory,
             iteration=iteration,
         )
-        
+
         # Update fix results in history so we know what worked and what didn't
         update_fix_results_from_execution(history, execution_result)
 

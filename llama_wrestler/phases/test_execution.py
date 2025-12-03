@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 class HTTPLogEntry(BaseModel):
     """A single HTTP request/response log entry."""
-    
+
     timestamp: str
     step_id: str
     request: dict[str, Any] = Field(default_factory=dict)
@@ -36,16 +36,16 @@ class HTTPLogEntry(BaseModel):
 
 class HTTPTrafficLog(BaseModel):
     """Log of all HTTP traffic during test execution."""
-    
+
     run_id: str
     iteration: int | None = None
     started_at: str
     completed_at: str | None = None
     entries: list[HTTPLogEntry] = Field(default_factory=list)
-    
+
     def add_entry(self, entry: HTTPLogEntry) -> None:
         self.entries.append(entry)
-    
+
     def save(self, output_dir: Path) -> Path:
         """Save the traffic log to a file."""
         self.completed_at = datetime.now().isoformat()
@@ -278,7 +278,7 @@ async def execute_step(
 ) -> StepResult:
     """Execute a single test step."""
     start_time = time.perf_counter()
-    
+
     # Prepare log entry data
     log_request: dict[str, Any] = {}
     log_response: dict[str, Any] = {}
@@ -392,17 +392,19 @@ async def execute_step(
                 ctx.auth_tokens[step.id] = auth_token
 
         success = response.status_code == step.expected_status
-        
+
         # Add to traffic log if enabled
         if ctx.traffic_log:
-            ctx.traffic_log.add_entry(HTTPLogEntry(
-                timestamp=datetime.now().isoformat(),
-                step_id=step.id,
-                request=log_request,
-                response=log_response,
-                duration_ms=duration_ms,
-                success=success,
-            ))
+            ctx.traffic_log.add_entry(
+                HTTPLogEntry(
+                    timestamp=datetime.now().isoformat(),
+                    step_id=step.id,
+                    request=log_request,
+                    response=log_response,
+                    duration_ms=duration_ms,
+                    success=success,
+                )
+            )
 
         return StepResult(
             step_id=step.id,
@@ -420,19 +422,21 @@ async def execute_step(
     except Exception as e:
         duration_ms = (time.perf_counter() - start_time) * 1000
         error_msg = f"{e.__class__.__name__}: {e}"
-        
+
         # Log failed request
         if ctx.traffic_log:
-            ctx.traffic_log.add_entry(HTTPLogEntry(
-                timestamp=datetime.now().isoformat(),
-                step_id=step.id,
-                request=log_request,
-                response=log_response,
-                duration_ms=duration_ms,
-                success=False,
-                error=error_msg,
-            ))
-        
+            ctx.traffic_log.add_entry(
+                HTTPLogEntry(
+                    timestamp=datetime.now().isoformat(),
+                    step_id=step.id,
+                    request=log_request,
+                    response=log_response,
+                    duration_ms=duration_ms,
+                    success=False,
+                    error=error_msg,
+                )
+            )
+
         return StepResult(
             step_id=step.id,
             success=False,
@@ -446,7 +450,7 @@ def _sanitize_headers_for_log(headers: dict[str, str] | None) -> dict[str, str]:
     """Sanitize headers for logging (mask sensitive values)."""
     if not headers:
         return {}
-    
+
     sanitized = {}
     for key, value in headers.items():
         if key.lower() == "authorization":
@@ -596,7 +600,7 @@ async def run_test_execution_phase(
     if openapi_spec:
         parser = OpenAPISchemaParser(openapi_spec)
         validator = RequestResponseValidator(parser)
-    
+
     # Create traffic log if output_dir is provided
     traffic_log: HTTPTrafficLog | None = None
     if output_dir:
@@ -687,10 +691,10 @@ async def run_test_execution_phase(
     else:
         async with httpx.AsyncClient() as client:
             result = await _run_with_client(client)
-    
+
     # Save traffic log if enabled
     if traffic_log and output_dir:
         log_file = traffic_log.save(output_dir)
         logger.info("HTTP traffic log saved to %s", log_file)
-    
+
     return result

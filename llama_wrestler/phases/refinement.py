@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class FixAttempt:
     """Record of a single fix attempt for a step."""
-    
+
     iteration: int
     payload: MockedPayload | None
     reasoning: str  # The model's reasoning for this fix
@@ -95,16 +95,18 @@ class IterationHistory:
         """Record a fix attempt before execution (error_after will be updated later)."""
         if step_id not in self.fix_attempts:
             self.fix_attempts[step_id] = []
-        
-        self.fix_attempts[step_id].append(FixAttempt(
-            iteration=self.current_iteration,
-            payload=payload,
-            reasoning=reasoning,
-            error_before=error_before,
-            error_after=None,  # Will be updated after execution
-            status_code=None,
-            succeeded=False,
-        ))
+
+        self.fix_attempts[step_id].append(
+            FixAttempt(
+                iteration=self.current_iteration,
+                payload=payload,
+                reasoning=reasoning,
+                error_before=error_before,
+                error_after=None,  # Will be updated after execution
+                status_code=None,
+                succeeded=False,
+            )
+        )
 
     def update_fix_result(
         self,
@@ -131,7 +133,7 @@ class IterationHistory:
         attempts = self.get_failed_attempts(step_id)
         if not attempts:
             return None
-        
+
         parts = [f"### Previous Fix Attempts for {step_id} (all failed):"]
         for i, attempt in enumerate(attempts, 1):
             parts.append(f"\n**Attempt {i} (iteration {attempt.iteration}):**")
@@ -144,10 +146,13 @@ class IterationHistory:
                 parts.append(f"- Status code: {attempt.status_code}")
             if attempt.payload:
                 import json
+
                 body_preview = json.dumps(attempt.payload.request_body)[:200]
                 parts.append(f"- Payload tried: {body_preview}...")
-        
-        parts.append("\n**⚠️ DO NOT repeat these same fixes. Try a different approach.**")
+
+        parts.append(
+            "\n**⚠️ DO NOT repeat these same fixes. Try a different approach.**"
+        )
         return "\n".join(parts)
 
     def get_regressions(self) -> list[str]:
@@ -169,11 +174,12 @@ class IterationHistory:
             for step_id in regressions
             if step_id in self.last_working_payloads
         }
-    
+
     def get_steps_with_multiple_failures(self, min_attempts: int = 2) -> list[str]:
         """Get step IDs that have failed multiple fix attempts."""
         return [
-            step_id for step_id, attempts in self.fix_attempts.items()
+            step_id
+            for step_id, attempts in self.fix_attempts.items()
             if len([a for a in attempts if not a.succeeded]) >= min_attempts
         ]
 
@@ -216,7 +222,7 @@ class RefinedStep(BaseModel):
 
 class UnfixableStep(BaseModel):
     """A step that cannot be fixed through payload refinement."""
-    
+
     step_id: str = Field(description="The step ID that cannot be fixed")
     reason: str = Field(description="Why this step cannot be fixed")
     category: str = Field(
@@ -234,8 +240,8 @@ class RefinementResult(BaseModel):
         default_factory=list, description="List of refined test step definitions"
     )
     unfixable_steps: list[UnfixableStep] = Field(
-        default_factory=list, 
-        description="Steps that cannot be fixed and should be skipped in future iterations"
+        default_factory=list,
+        description="Steps that cannot be fixed and should be skipped in future iterations",
     )
     analysis_summary: str = Field(
         description="Summary of failure analysis and fixes applied"
@@ -463,7 +469,7 @@ DO NOT mark a step unfixable just because your first fix didn't work. Only use t
 def _create_refinement_agent() -> Agent[RefinementDeps, RefinementResult]:
     """Create the refinement agent."""
     return Agent(
-        model=f"openai:{settings.openai_model}",
+        model=settings.get_model(),
         deps_type=RefinementDeps,
         output_type=RefinementResult,
         system_prompt=REFINEMENT_SYSTEM_PROMPT,
@@ -531,14 +537,18 @@ def _build_failure_context(
         definitions = openapi_spec.get("components", {}).get("schemas", {})
 
     parts = ["# Failed Test Steps Analysis\n"]
-    
+
     # Add summary of steps with multiple failed attempts
     if history:
         multi_failure_steps = history.get_steps_with_multiple_failures(min_attempts=2)
         if multi_failure_steps:
             parts.append("\n## ⚠️ Steps with Multiple Failed Fix Attempts\n")
-            parts.append("The following steps have had multiple fix attempts that all failed.")
-            parts.append("Consider whether these might be UNFIXABLE and should be marked as such.\n")
+            parts.append(
+                "The following steps have had multiple fix attempts that all failed."
+            )
+            parts.append(
+                "Consider whether these might be UNFIXABLE and should be marked as such.\n"
+            )
             for step_id in multi_failure_steps:
                 attempt_count = len(history.get_failed_attempts(step_id))
                 parts.append(f"- **{step_id}**: {attempt_count} failed attempts")
@@ -578,7 +588,7 @@ def _build_failure_context(
         parts.append(f"- Expected Status: {step.expected_status}")
         parts.append(f"- Actual Status: {result.status_code}")
         parts.append(f"- Error: {result.error or 'None'}")
-        
+
         # Add previous fix attempts for this step
         if history:
             attempt_summary = history.get_attempt_summary(step.id)
@@ -693,7 +703,7 @@ async def run_refinement_phase(
     failure_context = _build_failure_context(
         failed_step_results, test_data, openapi_spec, steps_with_broken_deps, history
     )
-    
+
     # Build context about steps with many failed attempts
     learning_context = ""
     if history:
@@ -704,7 +714,7 @@ async def run_refinement_phase(
 
 The following steps have been attempted multiple times without success.
 Consider marking them as UNFIXABLE if you cannot identify a new approach:
-{', '.join(multi_failure_steps)}
+{", ".join(multi_failure_steps)}
 
 For these steps, you should either:
 1. Propose a FUNDAMENTALLY DIFFERENT fix (not a minor variation)
@@ -743,19 +753,19 @@ REMEMBER: Check the "Previous Fix Attempts" sections for each step. DO NOT repea
 
     result = await agent.run(prompt, deps=deps)
     refinement_result = result.output
-    
+
     # Save request and response for analysis
     if output_dir:
         recaps_dir = output_dir / "recaps"
         recaps_dir.mkdir(exist_ok=True)
         iter_suffix = f"_iter{iteration}" if iteration else ""
         timestamp = datetime.now().strftime("%H%M%S")
-        
+
         # Save the full prompt (request)
         request_file = recaps_dir / f"refinement_request{iter_suffix}_{timestamp}.md"
         request_content = f"""# Refinement Request
 Generated at: {datetime.now().isoformat()}
-Iteration: {iteration or 'N/A'}
+Iteration: {iteration or "N/A"}
 
 ## System Prompt
 ```
@@ -771,26 +781,32 @@ Iteration: {iteration or 'N/A'}
 {failed_step_ids}
 
 ## Broken Dependency Step IDs
-{broken_dep_step_ids if broken_dep_step_ids else 'None'}
+{broken_dep_step_ids if broken_dep_step_ids else "None"}
 """
         with open(request_file, "w") as f:
             f.write(request_content)
         logger.info("Saved refinement request to %s", request_file)
-        
+
         # Save the response
-        response_file = recaps_dir / f"refinement_response{iter_suffix}_{timestamp}.json"
+        response_file = (
+            recaps_dir / f"refinement_response{iter_suffix}_{timestamp}.json"
+        )
         response_data = {
             "timestamp": datetime.now().isoformat(),
             "iteration": iteration,
             "analysis_summary": refinement_result.analysis_summary,
-            "refined_payloads": [p.model_dump() for p in refinement_result.refined_payloads],
+            "refined_payloads": [
+                p.model_dump() for p in refinement_result.refined_payloads
+            ],
             "refined_steps": [s.model_dump() for s in refinement_result.refined_steps],
-            "unfixable_steps": [u.model_dump() for u in refinement_result.unfixable_steps],
+            "unfixable_steps": [
+                u.model_dump() for u in refinement_result.unfixable_steps
+            ],
         }
         with open(response_file, "w") as f:
             json.dump(response_data, f, indent=2)
         logger.info("Saved refinement response to %s", response_file)
-    
+
     # Record fix attempts in history for future iterations
     if history:
         # Get the error for each failed step
@@ -933,20 +949,20 @@ def update_fix_results_from_execution(
 ) -> None:
     """
     Update the history with results from the latest execution.
-    
+
     This should be called after re-executing tests to record whether
     the fix attempts succeeded or failed.
-    
+
     Args:
         history: The iteration history to update
         execution_result: Results from the latest test execution
     """
     result_map = {r.step_id: r for r in execution_result.results}
-    
+
     for step_id in history.fix_attempts:
         if step_id not in result_map:
             continue
-        
+
         step_result = result_map[step_id]
         history.update_fix_result(
             step_id=step_id,

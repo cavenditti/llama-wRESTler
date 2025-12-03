@@ -62,7 +62,7 @@ DEPENDENCY GRAPH RULES:
 """
 
 agent = Agent(
-    model=f"openai:{settings.openai_model}",
+    model=settings.get_model(),
     deps_type=AgentDeps,
     output_type=APIPlan,
     system_prompt=system_prompt,

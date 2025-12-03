@@ -291,12 +291,12 @@ def test_run_multiple_executions_aggregates_results():
         # let's just verify the structure works
         # For now, just test with a consistent endpoint
         call_count["count"] = 0
-        
+
         async def consistent_handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"ok": True})
 
         transport = httpx.MockTransport(consistent_handler)
-        
+
         # Note: run_multiple_executions doesn't accept http_client param
         # This is a structural test more than a behavioral test
         # We'll test that the aggregation logic works

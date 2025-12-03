@@ -10,6 +10,11 @@
 
 Think of it like a [RESTler fuzzer](https://github.com/microsoft/restler-fuzzer) but with more llamas 🦙.
 
+> [!CAUTION]
+>
+> Current state: I'm still brainstorming ideas about what direction this should take.
+> It is somewhat usable but I'm experimenting and iterating very quickly (with a lot of vibe coding along the road).
+
 ## ✨ Features
 
 - **Automatic Test Plan Generation**: Analyzes your OpenAPI spec and creates a comprehensive test plan with proper endpoint ordering and dependencies
@@ -46,21 +51,73 @@ uv add llama-wrestler
 Create a `.env` file in your working directory with your LLM configuration:
 
 ```bash
-# Required: Your OpenAI API key (or compatible provider)
+# Model configuration using pydantic-ai format: "provider:model-name"
+# Primary model for test plan generation and refinement (complex reasoning tasks)
+MODEL=openai:gpt-4o
+
+# Weaker/cheaper model for summarization tasks (faster, cheaper)
+WEAK_MODEL=openai:gpt-4o-mini
+```
+
+#### Supported Providers
+
+| Provider | Model Format | API Key Variable |
+|----------|--------------|------------------|
+| OpenAI | `openai:gpt-4o` | `OPENAI_API_KEY` |
+| Anthropic | `anthropic:claude-sonnet-4-5` | `ANTHROPIC_API_KEY` |
+| Google | `google:gemini-2.5-pro` | `GOOGLE_API_KEY` |
+| Groq | `groq:llama-3.3-70b-versatile` | `GROQ_API_KEY` |
+| Mistral | `mistral:mistral-large-latest` | `MISTRAL_API_KEY` |
+| Together AI | `together:meta-llama/Llama-3.3-70B-Instruct-Turbo-Free` | `TOGETHER_API_KEY` |
+| Hugging Face | `huggingface:Qwen/Qwen3-235B-A22B` | `HUGGINGFACE_API_KEY` |
+| Cerebras | `cerebras:llama3.3-70b` | `CEREBRAS_API_KEY` |
+| Fireworks | `fireworks:accounts/fireworks/models/qwq-32b` | `FIREWORKS_API_KEY` |
+
+#### Example Configurations
+
+```bash
+# OpenAI (default)
+MODEL=openai:gpt-4o
+WEAK_MODEL=openai:gpt-4o-mini
+OPENAI_API_KEY=sk-...
+
+# Anthropic Claude
+MODEL=anthropic:claude-sonnet-4-5
+WEAK_MODEL=anthropic:claude-3-5-haiku-latest
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Google Gemini
+MODEL=google:gemini-2.5-pro
+WEAK_MODEL=google:gemini-2.0-flash
+GOOGLE_API_KEY=...
+
+# Mixed providers (use the best of each!)
+MODEL=anthropic:claude-sonnet-4-5
+WEAK_MODEL=openai:gpt-4o-mini
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+
+# Groq (fast inference)
+MODEL=groq:llama-3.3-70b-versatile
+WEAK_MODEL=groq:llama-3.1-8b-instant
+GROQ_API_KEY=gsk_...
+
+# OpenRouter (access 100+ models via one API)
+MODEL=openrouter:anthropic/claude-sonnet-4
+WEAK_MODEL=openrouter:openai/gpt-4o-mini
+# OPENAI_API_KEY won't be used for OpenRouter models
+# Please set OPENROUTER_API_KEY in your environment if needed
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+```
+
+#### Legacy Configuration (backwards compatible)
+
+The old OpenAI-specific settings still work:
+
+```bash
 OPENAI_API_KEY=your-api-key-here
-
-# Optional: Custom base URL for OpenAI-compatible APIs (e.g., Ollama, local models)
-OPENAI_BASE_URL=https://api.openai.com/v1
-
-# Optional: Model to use for test plan generation (default: gpt-4o)
 OPENAI_MODEL=gpt-4o
-
-# Optional: Weaker/cheaper model for per-step data generation (default: gpt-4o-mini)
 OPENAI_WEAK_MODEL=gpt-4o-mini
-
-# Optional: Max concurrent LLM requests for parallel data generation (default: unlimited)
-# Set this to avoid rate limiting, e.g., 5 or 10
-MAX_CONCURRENT_REQUESTS=10
 ```
 
 ## 📖 Usage
@@ -161,15 +218,17 @@ output/
 
 ## 🔧 Using with Local/Custom LLMs
 
-Llama wRESTler works with any OpenAI-compatible API. To use with Ollama or other local providers:
+Llama wRESTler works with any OpenAI-compatible API through pydantic-ai. For local providers like Ollama, you can use the OpenAI-compatible interface:
 
 ```bash
-# .env for Ollama
+# .env for Ollama (via OpenAI-compatible endpoint)
+MODEL=openai:llama3.2
+WEAK_MODEL=openai:llama3.2
 OPENAI_API_KEY=ollama
 OPENAI_BASE_URL=http://localhost:11434/v1
-OPENAI_MODEL=llama3.2
-OPENAI_WEAK_MODEL=llama3.2  # Can use the same model or a smaller one
 ```
+
+For LiteLLM proxy or other OpenAI-compatible servers, configure the base URL accordingly.
 
 ## 📋 Requirements
 
