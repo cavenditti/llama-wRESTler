@@ -13,6 +13,17 @@ from llama_wrestler.phases.test_execution import (
     APIExecutionResult,
     StepResult,
     sanitize_dependencies,
+    DependencySanitizationResult,
+)
+from llama_wrestler.phases.refinement import (
+    run_refinement_phase,
+    RefinementResult,
+    RefinedPayload,
+    RefinedStep,
+    IterationHistory,
+    fix_auth_requirements_from_spec,
+    get_refinable_failure_count,
+    calculate_pass_rate,
 )
 from llama_wrestler.phases.step_classification import (
     classify_step,
@@ -38,6 +49,16 @@ __all__ = [
     "APIExecutionResult",
     "StepResult",
     "sanitize_dependencies",
+    "DependencySanitizationResult",
+    # Refinement phase
+    "run_refinement_phase",
+    "RefinementResult",
+    "RefinedPayload",
+    "RefinedStep",
+    "IterationHistory",
+    "fix_auth_requirements_from_spec",
+    "get_refinable_failure_count",
+    "calculate_pass_rate",
     # Step classification (for potential future use)
     "classify_step",
     "classify_steps",

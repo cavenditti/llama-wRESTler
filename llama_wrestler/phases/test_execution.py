@@ -45,6 +45,10 @@ class APIExecutionResult(BaseModel):
     failed: int
     skipped: int
     results: list[StepResult] = Field(default_factory=list)
+    steps_with_broken_deps: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Mapping of step_id -> list of invalid dependency IDs that were removed",
+    )
 
 
 @dataclass
@@ -350,7 +354,22 @@ async def execute_step(
         )
 
 
-def sanitize_dependencies(steps: list[APIStep]) -> tuple[list[APIStep], set[str]]:
+class DependencySanitizationResult(BaseModel):
+    """Result of dependency sanitization."""
+
+    sanitized_steps: list[APIStep] = Field(
+        description="Steps with invalid dependencies removed"
+    )
+    removed_deps: set[str] = Field(
+        default_factory=set, description="Set of dependency IDs that were removed"
+    )
+    steps_with_broken_deps: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Mapping of step_id -> list of invalid dependency IDs that were removed",
+    )
+
+
+def sanitize_dependencies(steps: list[APIStep]) -> DependencySanitizationResult:
     """
     Remove invalid dependency references from steps.
 
@@ -361,16 +380,18 @@ def sanitize_dependencies(steps: list[APIStep]) -> tuple[list[APIStep], set[str]
         steps: List of API steps with potentially invalid dependencies
 
     Returns:
-        Tuple of (sanitized steps, set of removed dependency IDs)
+        DependencySanitizationResult with sanitized steps and tracking of removed deps
     """
     step_ids = {step.id for step in steps}
     removed_deps: set[str] = set()
+    steps_with_broken_deps: dict[str, list[str]] = {}
     sanitized_steps: list[APIStep] = []
 
     for step in steps:
-        invalid_deps = {dep for dep in step.depends_on if dep not in step_ids}
+        invalid_deps = [dep for dep in step.depends_on if dep not in step_ids]
         if invalid_deps:
             removed_deps.update(invalid_deps)
+            steps_with_broken_deps[step.id] = invalid_deps
             # Create a new step with only valid dependencies
             valid_deps = [dep for dep in step.depends_on if dep in step_ids]
             sanitized_step = step.model_copy(update={"depends_on": valid_deps})
@@ -384,18 +405,26 @@ def sanitize_dependencies(steps: list[APIStep]) -> tuple[list[APIStep], set[str]
             ", ".join(sorted(removed_deps)),
         )
 
-    return sanitized_steps, removed_deps
+    return DependencySanitizationResult(
+        sanitized_steps=sanitized_steps,
+        removed_deps=removed_deps,
+        steps_with_broken_deps=steps_with_broken_deps,
+    )
 
 
-def get_execution_order(steps: list[APIStep]) -> list[list[APIStep]]:
+def get_execution_order(
+    steps: list[APIStep],
+) -> tuple[list[list[APIStep]], DependencySanitizationResult]:
     """
     Determine the execution order based on dependencies.
-    Returns a list of batches, where each batch can be executed in parallel.
+    Returns a list of batches, where each batch can be executed in parallel,
+    along with information about any sanitized dependencies.
 
     Invalid dependencies are automatically removed with a warning.
     """
     # Sanitize dependencies first - remove any that reference non-existent steps
-    sanitized_steps, _ = sanitize_dependencies(steps)
+    sanitization_result = sanitize_dependencies(steps)
+    sanitized_steps = sanitization_result.sanitized_steps
 
     step_map = {step.id: step for step in sanitized_steps}
     step_ids = set(step_map.keys())
@@ -427,7 +456,7 @@ def get_execution_order(steps: list[APIStep]) -> list[list[APIStep]]:
     if processed != len(sanitized_steps):
         raise ValueError("Circular dependencies detected in test plan")
 
-    return batches
+    return batches, sanitization_result
 
 
 async def run_test_execution_phase(
@@ -469,10 +498,12 @@ async def run_test_execution_phase(
         passed = 0
         failed = 0
         skipped = 0
+        steps_with_broken_deps: dict[str, list[str]] = {}
 
         # Get execution order (batches of steps that can run in parallel)
         try:
-            batches = get_execution_order(test_plan.steps)
+            batches, sanitization_result = get_execution_order(test_plan.steps)
+            steps_with_broken_deps = sanitization_result.steps_with_broken_deps
         except ValueError as err:
             error_message = str(err)
             return APIExecutionResult(
@@ -528,6 +559,7 @@ async def run_test_execution_phase(
             failed=failed,
             skipped=skipped,
             results=results,
+            steps_with_broken_deps=steps_with_broken_deps,
         )
 
     if http_client:

@@ -12,6 +12,11 @@ from llama_wrestler.phases import (
     run_preliminary_phase,
     run_data_generation_phase,
     run_test_execution_phase,
+    run_refinement_phase,
+    get_refinable_failure_count,
+    calculate_pass_rate,
+    fix_auth_requirements_from_spec,
+    IterationHistory,
 )
 from llama_wrestler.models import APICredentials
 from llama_wrestler.spec_utils import (
@@ -96,6 +101,24 @@ async def run():
         action="store_true",
         help="Disable test plan caching (always regenerate)",
     )
+    # Refinement options
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=3,
+        help="Maximum number of refinement iterations (default: 3)",
+    )
+    parser.add_argument(
+        "--target-pass-rate",
+        type=float,
+        default=90.0,
+        help="Target pass rate percentage to stop refinement (default: 90.0)",
+    )
+    parser.add_argument(
+        "--no-refinement",
+        action="store_true",
+        help="Disable iterative refinement (run once only)",
+    )
     args = parser.parse_args()
 
     repo_path = Path(args.repo) if args.repo else None
@@ -175,6 +198,19 @@ async def run():
         for warning in auth_warnings:
             print(f"  ⚠️  {warning}")
 
+        # Auto-fix auth requirements based on OpenAPI spec
+        print("\n--- Auto-fixing auth requirements ---")
+        test_plan = fix_auth_requirements_from_spec(test_plan, openapi_spec)
+
+        # Re-validate to confirm fixes
+        remaining_warnings = validate_auth_requirements(test_plan, openapi_spec)
+        if remaining_warnings:
+            print("  Some warnings could not be auto-fixed:")
+            for warning in remaining_warnings:
+                print(f"    ⚠️  {warning}")
+        else:
+            print("  ✓ All auth requirements fixed!")
+
     # Save the OpenAPI spec
     openapi_filename = run_directory / "openapi_spec.json"
     with open(openapi_filename, "w") as f:
@@ -227,11 +263,17 @@ async def run():
         test_data=test_data,
     )
 
-    print("\n--- Test Execution Results ---")
-    print(f"Total: {execution_result.total_steps}")
-    print(f"Passed: {execution_result.passed}")
-    print(f"Failed: {execution_result.failed}")
-    print(f"Skipped: {execution_result.skipped}")
+    def print_execution_summary(result, iteration: int | None = None):
+        """Print a summary of execution results."""
+        iter_str = f" (Iteration {iteration})" if iteration else ""
+        print(f"\n--- Test Execution Results{iter_str} ---")
+        print(f"Total: {result.total_steps}")
+        print(f"Passed: {result.passed}")
+        print(f"Failed: {result.failed}")
+        print(f"Skipped: {result.skipped}")
+        print(f"Pass Rate: {calculate_pass_rate(result):.1f}%")
+
+    print_execution_summary(execution_result)
 
     # Print individual results
     for result in execution_result.results:
@@ -242,11 +284,151 @@ async def run():
         if result.error:
             print(f"      Error: {result.error}")
 
-    # Save the execution results
+    # Save initial execution results
     execution_result_filename = run_directory / "execution_results.json"
     with open(execution_result_filename, "w") as f:
         f.write(execution_result.model_dump_json(indent=2))
     print(f"\nExecution results saved to {execution_result_filename}")
+
+    # ==================== Phase 4: Iterative Refinement ====================
+    if args.no_refinement:
+        print(f"\n{'=' * 60}")
+        print("PHASE 4: Refinement (SKIPPED)")
+        print(f"{'=' * 60}")
+        return
+
+    current_pass_rate = calculate_pass_rate(execution_result)
+    refinable_failures = get_refinable_failure_count(execution_result)
+
+    # Check if refinement is needed
+    if current_pass_rate >= args.target_pass_rate:
+        print(f"\n✓ Target pass rate ({args.target_pass_rate}%) already achieved!")
+        return
+
+    if refinable_failures == 0:
+        print("\n⚠ No refinable failures found (all failures are dependency-based)")
+        return
+
+    print(f"\n{'=' * 60}")
+    print("PHASE 4: Iterative Refinement")
+    print(f"{'=' * 60}")
+    print(f"Current pass rate: {current_pass_rate:.1f}%")
+    print(f"Target pass rate: {args.target_pass_rate}%")
+    print(f"Max iterations: {args.max_iterations}")
+    print(f"Refinable failures: {refinable_failures}")
+
+    # Initialize iteration history for regression tracking
+    history = IterationHistory()
+    # Record the initial execution
+    history.record_iteration(execution_result, test_data)
+
+    iteration = 0
+    while iteration < args.max_iterations:
+        iteration += 1
+        print(f"\n{'─' * 40}")
+        print(f"Refinement Iteration {iteration}/{args.max_iterations}")
+        print(f"{'─' * 40}")
+
+        # Run refinement phase
+        print("\nAnalyzing failures and generating refined payloads...")
+        test_plan, test_data, refinement_result = await run_refinement_phase(
+            test_plan=test_plan,
+            openapi_spec=openapi_spec,
+            execution_result=execution_result,
+            test_data=test_data,
+            history=history,
+        )
+
+        print("\nRefinement Analysis:")
+        print(f"  {refinement_result.analysis_summary}")
+        print(f"  Payloads refined: {len(refinement_result.refined_payloads)}")
+        print(f"  Steps refined: {len(refinement_result.refined_steps)}")
+
+        # Report steps with broken dependencies that need fixing
+        if execution_result.steps_with_broken_deps:
+            print(
+                f"  ⚠️ Steps with invalid dependencies: {len(execution_result.steps_with_broken_deps)}"
+            )
+            for step_id, broken_deps in execution_result.steps_with_broken_deps.items():
+                print(f"      - {step_id}: missing [{', '.join(broken_deps)}]")
+
+        # Report regressions that were detected and reverted
+        regressions = history.get_regressions()
+        if regressions:
+            print(f"  ⚠️ Regressions detected and reverted: {len(regressions)}")
+            for step_id in regressions:
+                print(f"      - {step_id}")
+
+        if (
+            not refinement_result.refined_payloads
+            and not refinement_result.refined_steps
+        ):
+            print("\n⚠ No refinements made - stopping iteration")
+            break
+
+        # Save refined test plan if steps were modified
+        if refinement_result.refined_steps:
+            refined_plan_filename = run_directory / f"test_plan_iter{iteration}.json"
+            with open(refined_plan_filename, "w") as f:
+                f.write(test_plan.model_dump_json(indent=2))
+            print(f"Refined test plan saved to {refined_plan_filename}")
+
+        # Save refined test data
+        refined_data_filename = run_directory / f"test_data_iter{iteration}.json"
+        with open(refined_data_filename, "w") as f:
+            f.write(test_data.model_dump_json(indent=2))
+        print(f"Refined test data saved to {refined_data_filename}")
+
+        # Re-execute tests with refined data
+        print("\nRe-executing tests with refined payloads...")
+        execution_result = await run_test_execution_phase(
+            test_plan=test_plan,
+            test_data=test_data,
+        )
+
+        print_execution_summary(execution_result, iteration)
+
+        # Save iteration results
+        iter_results_filename = (
+            run_directory / f"execution_results_iter{iteration}.json"
+        )
+        with open(iter_results_filename, "w") as f:
+            f.write(execution_result.model_dump_json(indent=2))
+
+        # Check if we've reached the target
+        current_pass_rate = calculate_pass_rate(execution_result)
+        refinable_failures = get_refinable_failure_count(execution_result)
+
+        if current_pass_rate >= args.target_pass_rate:
+            print(f"\n✓ Target pass rate ({args.target_pass_rate}%) achieved!")
+            break
+
+        if refinable_failures == 0:
+            print("\n⚠ No more refinable failures - stopping iteration")
+            break
+
+    # Save final results
+    final_results_filename = run_directory / "execution_results_final.json"
+    with open(final_results_filename, "w") as f:
+        f.write(execution_result.model_dump_json(indent=2))
+
+    final_data_filename = run_directory / "test_data_final.json"
+    with open(final_data_filename, "w") as f:
+        f.write(test_data.model_dump_json(indent=2))
+
+    final_plan_filename = run_directory / "test_plan_final.json"
+    with open(final_plan_filename, "w") as f:
+        f.write(test_plan.model_dump_json(indent=2))
+
+    print(f"\n{'=' * 60}")
+    print("FINAL RESULTS")
+    print(f"{'=' * 60}")
+    print(f"Iterations completed: {iteration}")
+    print(f"Final pass rate: {current_pass_rate:.1f}%")
+    print(f"Total passed: {execution_result.passed}/{execution_result.total_steps}")
+    print(f"\nFinal results saved to {final_results_filename}")
+    print(f"Final test data saved to {final_data_filename}")
+    print(f"Final test plan saved to {final_plan_filename}")
 
 
 if __name__ == "__main__":

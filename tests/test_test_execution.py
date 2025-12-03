@@ -194,3 +194,57 @@ def test_run_test_execution_sanitizes_missing_dependency():
         assert result.results[0].success
 
     asyncio.run(_run())
+
+
+def test_run_test_execution_tracks_broken_dependencies():
+    """Test that broken dependencies are tracked in the execution result."""
+
+    async def _run():
+        test_plan = APIPlan(
+            summary="broken deps tracking",
+            base_url="https://api.test",
+            steps=[
+                APIStep(
+                    id="step1",
+                    description="valid step",
+                    endpoint="/step1",
+                    method="GET",
+                    expected_status=200,
+                    body_format=BodyFormat.NONE,
+                ),
+                APIStep(
+                    id="step2",
+                    description="depends on missing steps",
+                    endpoint="/step2",
+                    method="GET",
+                    expected_status=200,
+                    body_format=BodyFormat.NONE,
+                    depends_on=["missing-a", "step1", "missing-b"],
+                ),
+            ],
+        )
+        test_data = GeneratedTestData(
+            payloads=[
+                MockedPayload(step_id="step1", request_body=None),
+                MockedPayload(step_id="step2", request_body=None),
+            ]
+        )
+
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await run_test_execution_phase(
+                test_plan, test_data, http_client=client
+            )
+
+        # Both steps pass (invalid deps are removed)
+        assert result.passed == 2
+        assert result.failed == 0
+
+        # But we track which steps had broken dependencies
+        assert "step2" in result.steps_with_broken_deps
+        assert set(result.steps_with_broken_deps["step2"]) == {"missing-a", "missing-b"}
+
+        # step1 should not be in broken deps
+        assert "step1" not in result.steps_with_broken_deps
+
+    asyncio.run(_run())

@@ -112,6 +112,46 @@ def load_spec_hash(run_dir: Path) -> str | None:
     return None
 
 
+def find_best_versioned_file(directory: Path, prefix: str) -> Path | None:
+    """
+    Find the best available versioned file in a directory.
+
+    Searches for files following the naming convention:
+    1. {prefix}_final.json (highest priority)
+    2. {prefix}_iter{N}.json (highest iteration number)
+    3. {prefix}.json (fallback)
+
+    Args:
+        directory: The directory to search in
+        prefix: The file prefix (e.g., "test_plan", "test_data")
+
+    Returns:
+        Path to the best available file, or None if not found
+    """
+    # 1. Check for {prefix}_final.json
+    final_file = directory / f"{prefix}_final.json"
+    if final_file.exists():
+        return final_file
+
+    # 2. Check for {prefix}_iter*.json files (highest number first)
+    iter_files = sorted(
+        directory.glob(f"{prefix}_iter*.json"),
+        key=lambda p: int(re.search(r"iter(\d+)", p.name).group(1))
+        if re.search(r"iter(\d+)", p.name)
+        else -1,  # type: ignore
+        reverse=True,
+    )
+    if iter_files:
+        return iter_files[0]
+
+    # 3. Fall back to {prefix}.json
+    default_file = directory / f"{prefix}.json"
+    if default_file.exists():
+        return default_file
+
+    return None
+
+
 def find_cached_test_plan(output_dir: Path, spec_hash: str) -> APIPlan | None:
     """
     Look up a cached test plan from previous runs with the same spec hash.
@@ -153,7 +193,12 @@ def find_cached_test_plan(output_dir: Path, spec_hash: str) -> APIPlan | None:
 
     # Load the test plan from the most recent matching run
     latest_run_dir = matching_runs[0][0]
-    test_plan_file = latest_run_dir / "test_plan.json"
+
+    # Find the best available test plan file
+    test_plan_file = find_best_versioned_file(latest_run_dir, "test_plan")
+
+    if test_plan_file is None:
+        return None
 
     try:
         with open(test_plan_file, "r") as f:
@@ -240,6 +285,30 @@ def sort_api_plan(plan: APIPlan) -> APIPlan:
     """
     sorted_steps = topological_sort_steps(plan.steps)
     return APIPlan(summary=plan.summary, base_url=plan.base_url, steps=sorted_steps)
+
+
+def get_security_definitions(spec: dict[str, Any]) -> dict[str, Any]:
+    """
+    Extract security definitions from an OpenAPI spec.
+
+    Handles both Swagger 2.0 (securityDefinitions) and OpenAPI 3.x (components.securitySchemes).
+
+    Args:
+        spec: The OpenAPI spec dictionary
+
+    Returns:
+        Dict of security scheme names to their definitions
+    """
+    # OpenAPI 3.x uses components.securitySchemes
+    if "openapi" in spec:
+        components = spec.get("components", {})
+        return components.get("securitySchemes", {})
+
+    # Swagger 2.0 uses securityDefinitions
+    if "swagger" in spec:
+        return spec.get("securityDefinitions", {})
+
+    return {}
 
 
 def extract_security_requirements(spec: dict[str, Any]) -> dict[str, set[str]]:
