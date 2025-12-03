@@ -59,9 +59,7 @@ def get_covered_endpoints(plan: APIPlan) -> set[tuple[str, str]]:
     return {(step.method, step.endpoint) for step in plan.steps}
 
 
-def find_missing_endpoints(
-    openapi_spec: dict, plan: APIPlan
-) -> set[tuple[str, str]]:
+def find_missing_endpoints(openapi_spec: dict, plan: APIPlan) -> set[tuple[str, str]]:
     """
     Find endpoints in the OpenAPI spec that are not covered by the test plan.
 

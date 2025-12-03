@@ -157,7 +157,9 @@ def test_execute_step_reports_exception_type():
     asyncio.run(_run())
 
 
-def test_run_test_execution_reports_missing_dependency():
+def test_run_test_execution_sanitizes_missing_dependency():
+    """Test that missing dependencies are auto-repaired (removed) and step runs successfully."""
+
     async def _run():
         test_plan = APIPlan(
             summary="missing dep",
@@ -186,7 +188,9 @@ def test_run_test_execution_reports_missing_dependency():
                 test_plan, test_data, http_client=client
             )
 
-        assert result.failed == 1
-        assert "Missing dependencies" in (result.results[0].error or "")
+        # Invalid dependency is removed, step runs and passes
+        assert result.passed == 1
+        assert result.failed == 0
+        assert result.results[0].success
 
     asyncio.run(_run())

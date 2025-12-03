@@ -1,14 +1,22 @@
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+import logging
 from typing import Any
 from urllib.parse import quote
 import httpx
 import re
 import time
 from pydantic import BaseModel, Field
-
 from llama_wrestler.models import APIPlan, APIStep, BodyFormat, AuthRequirement
+
 from llama_wrestler.phases.data_generation import GeneratedTestData, MockedPayload
+from llama_wrestler.schema import (
+    OpenAPISchemaParser,
+    RequestResponseValidator,
+    ValidationResult,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class StepResult(BaseModel):
@@ -23,6 +31,10 @@ class StepResult(BaseModel):
     error: str | None = None
     duration_ms: float = 0
     auth_token_extracted: str | None = None  # Token if this was an auth provider step
+    request_validation: ValidationResult | None = None  # Request body validation result
+    response_validation: ValidationResult | None = (
+        None  # Response body validation result
+    )
 
 
 class APIExecutionResult(BaseModel):
@@ -43,6 +55,9 @@ class ExecutionContext:
     base_url: str
     step_responses: dict[str, Any] = field(default_factory=dict)
     auth_tokens: dict[str, str] = field(default_factory=dict)  # step_id -> token
+    validator: RequestResponseValidator | None = (
+        None  # Optional validator for OpenAPI validation
+    )
 
 
 @dataclass
@@ -283,6 +298,20 @@ async def execute_step(
         # Store response for dependent steps
         ctx.step_responses[step.id] = response_body
 
+        # Validate request body if validator is available
+        request_validation = None
+        if ctx.validator and request_body is not None:
+            request_validation = ctx.validator.validate_request_body(
+                step.endpoint, step.method.lower(), request_body
+            )
+
+        # Validate response body if validator is available
+        response_validation = None
+        if ctx.validator and response_body is not None:
+            response_validation = ctx.validator.validate_response(
+                step.endpoint, step.method.lower(), response.status_code, response_body
+            )
+
         # Extract token if this is an auth provider step
         auth_token = None
         if (
@@ -306,6 +335,8 @@ async def execute_step(
             response_headers=dict(response.headers),
             duration_ms=duration_ms,
             auth_token_extracted=auth_token,
+            request_validation=request_validation,
+            response_validation=response_validation,
         )
 
     except Exception as e:
@@ -319,22 +350,60 @@ async def execute_step(
         )
 
 
+def sanitize_dependencies(steps: list[APIStep]) -> tuple[list[APIStep], set[str]]:
+    """
+    Remove invalid dependency references from steps.
+
+    LLM-generated test plans sometimes reference step IDs that don't exist.
+    This function filters out those invalid references and returns sanitized steps.
+
+    Args:
+        steps: List of API steps with potentially invalid dependencies
+
+    Returns:
+        Tuple of (sanitized steps, set of removed dependency IDs)
+    """
+    step_ids = {step.id for step in steps}
+    removed_deps: set[str] = set()
+    sanitized_steps: list[APIStep] = []
+
+    for step in steps:
+        invalid_deps = {dep for dep in step.depends_on if dep not in step_ids}
+        if invalid_deps:
+            removed_deps.update(invalid_deps)
+            # Create a new step with only valid dependencies
+            valid_deps = [dep for dep in step.depends_on if dep in step_ids]
+            sanitized_step = step.model_copy(update={"depends_on": valid_deps})
+            sanitized_steps.append(sanitized_step)
+        else:
+            sanitized_steps.append(step)
+
+    if removed_deps:
+        logger.warning(
+            "Removed invalid dependency references from test plan: %s",
+            ", ".join(sorted(removed_deps)),
+        )
+
+    return sanitized_steps, removed_deps
+
+
 def get_execution_order(steps: list[APIStep]) -> list[list[APIStep]]:
     """
     Determine the execution order based on dependencies.
     Returns a list of batches, where each batch can be executed in parallel.
+
+    Invalid dependencies are automatically removed with a warning.
     """
-    step_map = {step.id: step for step in steps}
+    # Sanitize dependencies first - remove any that reference non-existent steps
+    sanitized_steps, _ = sanitize_dependencies(steps)
+
+    step_map = {step.id: step for step in sanitized_steps}
     step_ids = set(step_map.keys())
-    missing = {dep for step in steps for dep in step.depends_on if dep not in step_ids}
-    if missing:
-        missing_list = ", ".join(sorted(missing))
-        raise ValueError(f"Missing dependencies in test plan: {missing_list}")
 
     indegree: dict[str, int] = {step_id: 0 for step_id in step_ids}
     adjacency: dict[str, list[str]] = defaultdict(list)
 
-    for step in steps:
+    for step in sanitized_steps:
         for dep in step.depends_on:
             adjacency[dep].append(step.id)
             indegree[step.id] += 1
@@ -355,7 +424,7 @@ def get_execution_order(steps: list[APIStep]) -> list[list[APIStep]]:
                 if indegree[neighbor] == 0:
                     queue.append(neighbor)
 
-    if processed != len(steps):
+    if processed != len(sanitized_steps):
         raise ValueError("Circular dependencies detected in test plan")
 
     return batches
@@ -365,6 +434,7 @@ async def run_test_execution_phase(
     test_plan: APIPlan,
     test_data: GeneratedTestData,
     http_client: httpx.AsyncClient | None = None,
+    openapi_spec: dict[str, Any] | None = None,
 ) -> APIExecutionResult:
     """
     Run the test execution phase: execute all test steps with the generated data.
@@ -373,6 +443,7 @@ async def run_test_execution_phase(
         test_plan: The test plan to execute
         test_data: The generated mock data for each step
         http_client: Optional HTTP client (will create one if not provided)
+        openapi_spec: Optional OpenAPI specification for request/response validation
 
     Returns:
         APIExecutionResult with results for all steps
@@ -381,8 +452,18 @@ async def run_test_execution_phase(
     # Create payload lookup
     payload_map = {p.step_id: p for p in test_data.payloads}
 
+    # Create validator if OpenAPI spec is provided
+    validator: RequestResponseValidator | None = None
+    if openapi_spec:
+        parser = OpenAPISchemaParser(openapi_spec)
+        validator = RequestResponseValidator(parser)
+
     async def _run_with_client(client: httpx.AsyncClient) -> APIExecutionResult:
-        ctx = ExecutionContext(http_client=client, base_url=test_plan.base_url)
+        ctx = ExecutionContext(
+            http_client=client,
+            base_url=test_plan.base_url,
+            validator=validator,
+        )
 
         results: list[StepResult] = []
         passed = 0
