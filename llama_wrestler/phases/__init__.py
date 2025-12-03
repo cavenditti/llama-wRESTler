@@ -3,6 +3,10 @@ from llama_wrestler.phases.data_generation import (
     run_data_generation_phase,
     run_deterministic_data_generation,
     GeneratedTestData,
+    MockedPayload,
+    find_missing_step_ids,
+    find_extra_step_ids,
+    merge_test_data,
 )
 from llama_wrestler.phases.test_execution import (
     run_test_execution_phase,
@@ -17,6 +21,10 @@ __all__ = [
     "run_data_generation_phase",
     "run_deterministic_data_generation",
     "GeneratedTestData",
+    "MockedPayload",
+    "find_missing_step_ids",
+    "find_extra_step_ids",
+    "merge_test_data",
     "run_test_execution_phase",
     "APIExecutionResult",
     "StepResult",

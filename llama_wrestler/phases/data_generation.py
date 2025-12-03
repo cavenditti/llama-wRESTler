@@ -21,6 +21,9 @@ from llama_wrestler.schema import (
 
 logger = logging.getLogger(__name__)
 
+# Maximum number of retry passes to fill in missing payloads
+MAX_DATA_GENERATION_RETRIES = 3
+
 
 class MockedPayload(BaseModel):
     """Mocked data for a single test step."""
@@ -398,6 +401,147 @@ def _find_auth_provider_step(
     return None
 
 
+# ============================================================================
+# Validation and coverage functions
+# ============================================================================
+
+
+def get_required_step_ids(test_plan: APIPlan) -> set[str]:
+    """
+    Get the set of step IDs that require generated data.
+
+    Args:
+        test_plan: The test plan
+
+    Returns:
+        Set of step IDs from the test plan
+    """
+    return {step.id for step in test_plan.steps}
+
+
+def get_generated_step_ids(test_data: GeneratedTestData) -> set[str]:
+    """
+    Get the set of step IDs that have generated data.
+
+    Args:
+        test_data: The generated test data
+
+    Returns:
+        Set of step IDs with payloads
+    """
+    return {payload.step_id for payload in test_data.payloads}
+
+
+def find_missing_step_ids(
+    test_plan: APIPlan, test_data: GeneratedTestData
+) -> set[str]:
+    """
+    Find step IDs that are in the test plan but missing from generated data.
+
+    Args:
+        test_plan: The test plan
+        test_data: The generated test data
+
+    Returns:
+        Set of step IDs that are missing payloads
+    """
+    required = get_required_step_ids(test_plan)
+    generated = get_generated_step_ids(test_data)
+    return required - generated
+
+
+def find_extra_step_ids(
+    test_plan: APIPlan, test_data: GeneratedTestData
+) -> set[str]:
+    """
+    Find step IDs in generated data that are not in the test plan.
+
+    Args:
+        test_plan: The test plan
+        test_data: The generated test data
+
+    Returns:
+        Set of step IDs that are extra (not in test plan)
+    """
+    required = get_required_step_ids(test_plan)
+    generated = get_generated_step_ids(test_data)
+    return generated - required
+
+
+def filter_valid_payloads(
+    test_plan: APIPlan, test_data: GeneratedTestData
+) -> GeneratedTestData:
+    """
+    Remove payloads for steps that don't exist in the test plan.
+
+    Args:
+        test_plan: The test plan
+        test_data: The generated test data
+
+    Returns:
+        GeneratedTestData with only valid payloads
+    """
+    valid_step_ids = get_required_step_ids(test_plan)
+    valid_payloads = [
+        p for p in test_data.payloads if p.step_id in valid_step_ids
+    ]
+    return GeneratedTestData(payloads=valid_payloads)
+
+
+def merge_test_data(
+    base_data: GeneratedTestData,
+    additional_data: GeneratedTestData,
+    test_plan: APIPlan,
+) -> GeneratedTestData:
+    """
+    Merge additional payloads into base data, avoiding duplicates.
+
+    Payloads from additional_data are added only if their step_id
+    is not already present in base_data.
+
+    Args:
+        base_data: The base test data
+        additional_data: Additional payloads to merge
+        test_plan: The test plan (for ordering)
+
+    Returns:
+        Merged GeneratedTestData
+    """
+    existing_ids = {p.step_id for p in base_data.payloads}
+    valid_step_ids = get_required_step_ids(test_plan)
+
+    new_payloads = [
+        p
+        for p in additional_data.payloads
+        if p.step_id not in existing_ids and p.step_id in valid_step_ids
+    ]
+
+    # Combine and sort by test plan order
+    all_payloads = base_data.payloads + new_payloads
+    step_order = {step.id: i for i, step in enumerate(test_plan.steps)}
+    sorted_payloads = sorted(
+        all_payloads,
+        key=lambda p: step_order.get(p.step_id, float("inf")),
+    )
+
+    return GeneratedTestData(payloads=sorted_payloads)
+
+
+def get_missing_steps(test_plan: APIPlan, test_data: GeneratedTestData) -> list[APIStep]:
+    """
+    Get the list of steps that are missing from the generated data.
+
+    Args:
+        test_plan: The test plan
+        test_data: The generated test data
+
+    Returns:
+        List of APIStep objects that need data generation
+    """
+    missing_ids = find_missing_step_ids(test_plan, test_data)
+    return [step for step in test_plan.steps if step.id in missing_ids]
+
+
 def run_deterministic_data_generation(
     test_plan: APIPlan,
     openapi_spec: dict,
@@ -566,9 +710,11 @@ async def _run_per_step_generation(
     1. Each request is small and focused
     2. Less likely to hit token limits or timeouts
     3. Easier to debug individual step failures
+    4. Guarantees one payload per step (with fallback on failure)
     """
     payloads: list[MockedPayload] = []
     previous_step_ids: list[str] = []
+    failed_step_ids: list[str] = []
 
     # Find the first auth provider step for use in subsequent steps
     auth_provider_step_id: str | None = None
@@ -600,6 +746,7 @@ async def _run_per_step_generation(
             payloads.append(payload)
         except Exception as e:
             logger.error("Failed to generate data for step %s: %s", step.id, e)
+            failed_step_ids.append(step.id)
             # Create a minimal fallback payload
             payloads.append(
                 MockedPayload(
@@ -613,6 +760,16 @@ async def _run_per_step_generation(
 
         previous_step_ids.append(step.id)
 
+    # Log final status
+    if failed_step_ids:
+        logger.warning(
+            "Failed to generate proper data for %d step(s) (using fallback): %s",
+            len(failed_step_ids),
+            failed_step_ids,
+        )
+    else:
+        logger.info("Successfully generated data for all %d step(s)", total_steps)
+
     return GeneratedTestData(payloads=payloads)
 
 
@@ -624,8 +781,8 @@ async def _run_bulk_generation(
     """
     Generate test data for all steps in one bulk request using the strong model.
 
-    This is the legacy approach - works for small test plans but can fail
-    for large ones due to token limits.
+    This approach includes validation and retry logic to ensure all steps
+    in the test plan have generated data.
     """
     deps = DataGenerationDeps(
         test_plan=test_plan,
@@ -645,4 +802,69 @@ async def _run_bulk_generation(
     """
 
     result = await data_generation_agent.run(prompt, deps=deps)
-    return result.output
+    current_data = result.output
+
+    # Filter out any extra payloads not in the test plan
+    extra_ids = find_extra_step_ids(test_plan, current_data)
+    if extra_ids:
+        logger.warning(
+            "Removing %d extra payloads not in test plan: %s",
+            len(extra_ids),
+            sorted(extra_ids),
+        )
+        current_data = filter_valid_payloads(test_plan, current_data)
+
+    # Check for missing steps and retry if needed
+    for retry_num in range(1, MAX_DATA_GENERATION_RETRIES + 1):
+        missing_ids = find_missing_step_ids(test_plan, current_data)
+
+        if not missing_ids:
+            logger.info("Full data coverage achieved after %d attempt(s)", retry_num)
+            break
+
+        logger.info(
+            "Attempt %d: Found %d missing step(s), retrying...",
+            retry_num,
+            len(missing_ids),
+        )
+
+        # Build prompt for missing steps only
+        missing_steps = get_missing_steps(test_plan, current_data)
+        missing_list = "\n".join(
+            f"  - {step.id}: {step.method} {step.endpoint}"
+            for step in missing_steps
+        )
+
+        retry_prompt = f"""Generate mock data for the following steps that are missing from the previous generation.
+
+Missing steps:
+{missing_list}
+
+Use the same format as before. Only generate data for these specific steps.
+
+IMPORTANT: Use the exact step_id values listed above.
+"""
+
+        try:
+            retry_result = await data_generation_agent.run(retry_prompt, deps=deps)
+            additional_data = retry_result.output
+            current_data = merge_test_data(current_data, additional_data, test_plan)
+        except Exception as e:
+            logger.warning("Retry %d failed: %s", retry_num, e)
+            continue
+
+    # Log final coverage status
+    final_missing = find_missing_step_ids(test_plan, current_data)
+    if final_missing:
+        logger.warning(
+            "Could not generate data for %d step(s): %s",
+            len(final_missing),
+            sorted(final_missing),
+        )
+    else:
+        logger.info(
+            "Generated data for all %d step(s) in test plan",
+            len(test_plan.steps),
+        )
+
+    return current_data
