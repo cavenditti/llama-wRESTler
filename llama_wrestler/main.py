@@ -14,6 +14,13 @@ from llama_wrestler.phases import (
     run_test_execution_phase,
 )
 from llama_wrestler.models import APICredentials
+from llama_wrestler.spec_utils import (
+    compute_spec_hash,
+    save_spec_hash,
+    find_cached_test_plan,
+    sort_api_plan,
+    validate_auth_requirements,
+)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -84,6 +91,11 @@ async def run():
         help="Path to JSON file with credentials (username, password, and extra fields)",
         default=None,
     )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable test plan caching (always regenerate)",
+    )
     args = parser.parse_args()
 
     repo_path = Path(args.repo) if args.repo else None
@@ -116,33 +128,68 @@ async def run():
     if repo_path:
         print(f"Analyzing repository at: {repo_path}")
 
-    preliminary_result = await run_preliminary_phase(
-        openapi_url=args.openapi_url,
-        repo_path=repo_path,
-    )
+    # First, fetch the OpenAPI spec to check for cached test plans
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(args.openapi_url)
+        response.raise_for_status()
+        openapi_spec = response.json()
+
+    # Compute hash of normalized spec
+    spec_hash = compute_spec_hash(openapi_spec)
+    print(f"Spec hash: {spec_hash[:16]}...")
+
+    # Check for cached test plan
+    cached_plan = None
+    if not args.no_cache:
+        cached_plan = find_cached_test_plan(output_dir, spec_hash)
+        if cached_plan:
+            print(f"Found cached test plan from previous run!")
+
+    if cached_plan:
+        # Use cached plan
+        test_plan = cached_plan
+        print("Using cached test plan (use --no-cache to regenerate)")
+    else:
+        # Generate new test plan
+        preliminary_result = await run_preliminary_phase(
+            openapi_url=args.openapi_url,
+            repo_path=repo_path,
+        )
+        test_plan = preliminary_result.test_plan
+        # Update openapi_spec from preliminary result if available
+        if preliminary_result.openapi_spec:
+            openapi_spec = preliminary_result.openapi_spec
+
+    # Sort the test plan in topological + lexicographical order
+    test_plan = sort_api_plan(test_plan)
 
     print("\n--- Generated Test Plan ---")
-    debug(preliminary_result.test_plan)
+    debug(test_plan)
+
+    # Validate auth requirements against spec
+    auth_warnings = validate_auth_requirements(test_plan, openapi_spec)
+    if auth_warnings:
+        print("\n--- Authentication Validation Warnings ---")
+        for warning in auth_warnings:
+            print(f"  ⚠️  {warning}")
 
     # Save the OpenAPI spec
-    if preliminary_result.openapi_spec:
-        openapi_filename = run_directory / "openapi_spec.json"
-        with open(openapi_filename, "w") as f:
-            json.dump(preliminary_result.openapi_spec, f, indent=2)
-        print(f"OpenAPI spec saved to {openapi_filename}")
+    openapi_filename = run_directory / "openapi_spec.json"
+    with open(openapi_filename, "w") as f:
+        json.dump(openapi_spec, f, indent=2)
+    print(f"OpenAPI spec saved to {openapi_filename}")
 
-    # Save the test plan
+    # Save the spec hash
+    save_spec_hash(run_directory, spec_hash)
+    print(f"Spec hash saved to {run_directory / 'spec_hash.txt'}")
+
+    # Save the test plan (sorted)
     test_plan_filename = run_directory / "test_plan.json"
     with open(test_plan_filename, "w") as f:
-        f.write(preliminary_result.test_plan.model_dump_json(indent=2))
+        f.write(test_plan.model_dump_json(indent=2))
     print(f"Test plan saved to {test_plan_filename}")
-
-    # Check if we have the OpenAPI spec for the next phases
-    if not preliminary_result.openapi_spec:
-        print(
-            "\nWarning: No OpenAPI spec was fetched. Cannot proceed with data generation."
-        )
-        return
 
     # ==================== Phase 2: Data Generation ====================
     print(f"\n{'=' * 60}")
@@ -150,8 +197,8 @@ async def run():
     print(f"{'=' * 60}")
 
     test_data = await run_data_generation_phase(
-        test_plan=preliminary_result.test_plan,
-        openapi_spec=preliminary_result.openapi_spec,
+        test_plan=test_plan,
+        openapi_spec=openapi_spec,
         credentials=credentials,
     )
 
@@ -176,7 +223,7 @@ async def run():
     print(f"{'=' * 60}")
 
     execution_result = await run_test_execution_phase(
-        test_plan=preliminary_result.test_plan,
+        test_plan=test_plan,
         test_data=test_data,
     )
 

@@ -660,6 +660,7 @@ async def run_data_generation_phase(
     per_step: bool = True,
     seed: int | str | None = None,
     max_concurrent: int | None = None,
+    request_delay: float | None = None,
 ) -> GeneratedTestData:
     """
     Run the data generation phase: generate mock data for all test steps.
@@ -674,6 +675,8 @@ async def run_data_generation_phase(
         seed: Optional seed for deterministic generation (only used when use_llm=False)
         max_concurrent: Maximum number of concurrent LLM requests (None = unlimited).
                         Use this to throttle API calls and avoid rate limiting.
+        request_delay: Minimum delay (in seconds) between LLM requests. Useful to prevent
+                       rate limiting with smaller models. Defaults to settings.request_delay.
 
     Returns:
         GeneratedTestData containing mock payloads for each test step
@@ -693,6 +696,7 @@ async def run_data_generation_phase(
             openapi_spec=openapi_spec,
             credentials=credentials,
             max_concurrent=max_concurrent,
+            request_delay=request_delay if request_delay is not None else settings.request_delay,
         )
 
     # Bulk generation with strong model (legacy mode)
@@ -708,6 +712,7 @@ async def _run_per_step_generation(
     openapi_spec: dict,
     credentials: APICredentials | None = None,
     max_concurrent: int | None = None,
+    request_delay: float = 0.0,
 ) -> GeneratedTestData:
     """
     Generate test data for all steps in parallel using the weak model.
@@ -716,19 +721,22 @@ async def _run_per_step_generation(
     1. Each request is small and focused
     2. Requests run in parallel for speed
     3. Optional throttling via max_concurrent
-    4. Guarantees one payload per step (with fallback on failure)
+    4. Optional delay between requests via request_delay
+    5. Guarantees one payload per step (with fallback on failure)
 
     Args:
         test_plan: The test plan
         openapi_spec: The OpenAPI specification
         credentials: Optional credentials
         max_concurrent: Max parallel requests (None = unlimited)
+        request_delay: Minimum delay (seconds) between requests (default: 0.0)
     """
     total_steps = len(test_plan.steps)
     logger.info(
-        "Generating data for %d steps in parallel (max_concurrent=%s)",
+        "Generating data for %d steps in parallel (max_concurrent=%s, delay=%.2fs)",
         total_steps,
         max_concurrent or "unlimited",
+        request_delay,
     )
 
     # Find the first auth provider step for use in subsequent steps
@@ -745,8 +753,12 @@ async def _run_per_step_generation(
     semaphore = asyncio.Semaphore(max_concurrent) if max_concurrent else None
 
     async def generate_with_throttle(step: APIStep, index: int) -> MockedPayload:
-        """Generate data for a single step, with optional throttling."""
+        """Generate data for a single step, with optional throttling and delay."""
         async def _generate() -> MockedPayload:
+            # Apply delay before making the request (skip for first request)
+            if request_delay > 0 and index > 0:
+                await asyncio.sleep(request_delay)
+
             # Find the auth provider for this specific step
             step_auth_provider = _find_auth_provider_step(
                 step.id, test_plan, step.depends_on

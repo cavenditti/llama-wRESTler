@@ -9,6 +9,7 @@ class Settings(BaseSettings):
         "gpt-4o-mini"  # Weaker/cheaper model for per-step data generation
     )
     max_concurrent_requests: int | None = None  # Max parallel LLM requests (None = unlimited)
+    request_delay: float = 0.0  # Minimum delay (seconds) between LLM requests (for rate limiting)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
