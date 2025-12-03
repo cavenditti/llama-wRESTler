@@ -1,6 +1,6 @@
 from enum import Enum
 from pydantic.fields import Field
-from typing import Any, List, Literal, Optional
+from typing import Any, Literal
 from pydantic import BaseModel
 
 
@@ -67,11 +67,11 @@ class APIStep(BaseModel):
     method: Literal["GET", "POST", "PUT", "DELETE", "PATCH"] = Field(
         description="HTTP method"
     )
-    depends_on: List[str] = Field(
+    depends_on: list[str] = Field(
         default_factory=list,
         description="List of step IDs that must complete before this one",
     )
-    payload_description: Optional[str] = Field(
+    payload_description: str | None = Field(
         None, description="Description of the payload structure if applicable"
     )
     expected_status: int = Field(description="Expected HTTP status code")
@@ -83,7 +83,7 @@ class APIStep(BaseModel):
         default=AuthRequirement.NONE,
         description="Authentication requirement for this endpoint. AUTH_PROVIDER for login/token endpoints, REQUIRED for protected routes, NONE for public routes",
     )
-    auth_token_path: Optional[str] = Field(
+    auth_token_path: str | None = Field(
         None,
         description="If this is an AUTH_PROVIDER step, the JSON path to extract the token from response (e.g., 'access_token' or 'data.token')",
     )
@@ -92,4 +92,4 @@ class APIStep(BaseModel):
 class APIPlan(BaseModel):
     summary: str = Field(description="High-level summary of the testing strategy")
     base_url: str = Field(description="The base URL of the API")
-    steps: List[APIStep] = Field(description="List of test steps to execute")
+    steps: list[APIStep] = Field(description="List of test steps to execute")
