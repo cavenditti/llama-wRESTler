@@ -473,6 +473,7 @@ def _create_refinement_agent() -> Agent[RefinementDeps, RefinementResult]:
         deps_type=RefinementDeps,
         output_type=RefinementResult,
         system_prompt=REFINEMENT_SYSTEM_PROMPT,
+        retries=3,
     )
 
 
