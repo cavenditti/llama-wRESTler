@@ -52,8 +52,11 @@ OPENAI_API_KEY=your-api-key-here
 # Optional: Custom base URL for OpenAI-compatible APIs (e.g., Ollama, local models)
 OPENAI_BASE_URL=https://api.openai.com/v1
 
-# Optional: Model to use (default: gpt-4o)
+# Optional: Model to use for test plan generation (default: gpt-4o)
 OPENAI_MODEL=gpt-4o
+
+# Optional: Weaker/cheaper model for per-step data generation (default: gpt-4o-mini)
+OPENAI_WEAK_MODEL=gpt-4o-mini
 ```
 
 ## 📖 Usage
@@ -161,6 +164,7 @@ Llama wRESTler works with any OpenAI-compatible API. To use with Ollama or other
 OPENAI_API_KEY=ollama
 OPENAI_BASE_URL=http://localhost:11434/v1
 OPENAI_MODEL=llama3.2
+OPENAI_WEAK_MODEL=llama3.2  # Can use the same model or a smaller one
 ```
 
 ## 📋 Requirements
