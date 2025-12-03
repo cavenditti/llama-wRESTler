@@ -1,11 +1,19 @@
-import asyncio
-from dataclasses import dataclass
-import json
+"""
+Data generation phase: Generate test data for API test steps.
+
+This module provides deterministic data generation based on OpenAPI schemas,
+with support for:
+- Schema-based data generation
+- Automatic placeholder generation for path params referencing dependencies
+- Auth header placeholders for protected endpoints
+- Credential injection for auth provider endpoints
+"""
+
 import logging
 import re
 from typing import Any
+
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, RunContext
 
 from llama_wrestler.models import (
     APIPlan,
@@ -13,7 +21,6 @@ from llama_wrestler.models import (
     APICredentials,
     AuthRequirement,
 )
-from llama_wrestler.settings import settings
 from llama_wrestler.schema import (
     OpenAPISchemaParser,
     DeterministicGenerator,
@@ -22,16 +29,14 @@ from llama_wrestler.schema import (
 
 logger = logging.getLogger(__name__)
 
-# Maximum number of retry passes to fill in missing payloads
-MAX_DATA_GENERATION_RETRIES = 3
-
 
 class MockedPayload(BaseModel):
     """Mocked data for a single test step."""
 
     step_id: str = Field(description="The ID of the test step this payload is for")
     request_body: dict | list | None = Field(
-        None, description="The request body to send, if applicable (can be dict or list)"
+        None,
+        description="The request body to send, if applicable (can be dict or list)",
     )
     path_params: dict[str, Any] = Field(
         default_factory=dict,
@@ -53,331 +58,6 @@ class GeneratedTestData(BaseModel):
     payloads: list[MockedPayload] = Field(
         description="List of mocked payloads for each test step"
     )
-
-
-@dataclass
-class DataGenerationDeps:
-    """Dependencies for the data generation agent (bulk mode)."""
-
-    test_plan: APIPlan
-    openapi_spec: dict
-    credentials: APICredentials | None = None
-
-
-@dataclass
-class SingleStepDeps:
-    """Dependencies for per-step data generation agent."""
-
-    step: APIStep
-    openapi_spec: dict
-    credentials: APICredentials | None = None
-    # Context from previous steps for dependency resolution
-    previous_step_ids: list[str] = None  # type: ignore
-    auth_provider_step_id: str | None = None
-
-
-# ============================================================================
-# Per-step agent (uses weak model for efficiency)
-# ============================================================================
-
-SINGLE_STEP_SYSTEM_PROMPT = """
-You are a test data generation expert. Generate mock data for a SINGLE API test step.
-
-You will receive:
-1. A single test step definition
-2. Relevant parts of the OpenAPI specification
-3. Context about previous steps (for dependency placeholders)
-
-OUTPUT STRUCTURE (MockedPayload):
-- step_id: The ID of the test step (copy from input)
-- request_body: Dict for POST/PUT/PATCH, null for GET/DELETE
-- path_params: Dict of path parameters from URL template (e.g., /items/{item_id})
-- query_params: Dict of query parameters
-- headers: Dict of headers (IMPORTANT for Authorization!)
-
-BODY FORMAT RULES:
-- "json": Standard JSON object
-- "form_urlencoded": Dict for form data (OAuth2: include grant_type)
-- "multipart": Dict with file info
-- "none": request_body must be null
-
-AUTHENTICATION RULES:
-- auth_requirement="auth_provider": This IS the login endpoint. Put credentials in request_body.
-- auth_requirement="required": Add Authorization header with placeholder: {"Authorization": "Bearer {{auth_step_id.access_token}}"}
-- auth_requirement="none"/"optional": No auth header needed
-
-PLACEHOLDER SYNTAX:
-Use {{step_id.field_path}} to reference values from previous step responses.
-Examples:
-- {{auth_login.access_token}} - token from login
-- {{create_item.id}} - ID from created item
-- {{user_create.data.user_id}} - nested field
-
-IMPORTANT:
-1. Check endpoint for path parameters: /items/{item_id} → path_params: {"item_id": ...}
-2. For auth_requirement="required", ALWAYS add Authorization header
-3. Use realistic but fake data
-4. If credentials are provided for auth_provider steps, USE THEM EXACTLY
-"""
-
-
-def _create_single_step_agent() -> Agent[SingleStepDeps, MockedPayload]:
-    """Create a per-step data generation agent using the weak model."""
-    return Agent(
-        model=f"openai:{settings.openai_weak_model}",
-        deps_type=SingleStepDeps,
-        output_type=MockedPayload,
-        system_prompt=SINGLE_STEP_SYSTEM_PROMPT,
-    )
-
-
-def _get_endpoint_spec(openapi_spec: dict, endpoint: str, method: str) -> dict:
-    """Extract the relevant spec portion for a specific endpoint."""
-    paths = openapi_spec.get("paths", {})
-    path_spec = paths.get(endpoint, {})
-    operation_spec = path_spec.get(method.lower(), {})
-
-    # Include definitions/schemas for reference
-    result = {
-        "endpoint": endpoint,
-        "method": method,
-        "operation": operation_spec,
-    }
-
-    # Add schema definitions
-    if "swagger" in openapi_spec:
-        result["definitions"] = openapi_spec.get("definitions", {})
-    else:
-        components = openapi_spec.get("components", {})
-        result["schemas"] = components.get("schemas", {})
-
-    return result
-
-
-async def _generate_single_step_data(
-    step: APIStep,
-    openapi_spec: dict,
-    credentials: APICredentials | None,
-    previous_step_ids: list[str],
-    auth_provider_step_id: str | None,
-) -> MockedPayload:
-    """Generate data for a single step using the weak model."""
-    agent = _create_single_step_agent()
-
-    deps = SingleStepDeps(
-        step=step,
-        openapi_spec=openapi_spec,
-        credentials=credentials,
-        previous_step_ids=previous_step_ids,
-        auth_provider_step_id=auth_provider_step_id,
-    )
-
-    # Build a focused prompt for this step
-    endpoint_spec = _get_endpoint_spec(openapi_spec, step.endpoint, step.method)
-
-    prompt_parts = [
-        "Generate test data for this step:",
-        "",
-        f"Step ID: {step.id}",
-        f"Description: {step.description}",
-        f"Endpoint: {step.method} {step.endpoint}",
-        f"Body Format: {step.body_format.value}",
-        f"Auth Requirement: {step.auth_requirement.value}",
-        f"Dependencies: {step.depends_on}",
-        f"Expected Status: {step.expected_status}",
-    ]
-
-    if step.payload_description:
-        prompt_parts.append(f"Payload Description: {step.payload_description}")
-
-    prompt_parts.extend(
-        [
-            "",
-            "OpenAPI Spec for this endpoint:",
-            json.dumps(endpoint_spec, indent=2),
-        ]
-    )
-
-    if auth_provider_step_id and step.auth_requirement == AuthRequirement.REQUIRED:
-        prompt_parts.extend(
-            [
-                "",
-                f"NOTE: Use this auth step ID for Authorization header: {auth_provider_step_id}",
-            ]
-        )
-
-    if credentials and step.auth_requirement == AuthRequirement.AUTH_PROVIDER:
-        prompt_parts.extend(
-            [
-                "",
-                "CREDENTIALS TO USE (use these EXACTLY):",
-                credentials.to_prompt_context(),
-            ]
-        )
-
-    if previous_step_ids:
-        prompt_parts.extend(
-            [
-                "",
-                f"Previous steps (for placeholders): {previous_step_ids}",
-            ]
-        )
-
-    prompt = "\n".join(prompt_parts)
-
-    result = await agent.run(prompt, deps=deps)
-    return result.output
-
-
-# ============================================================================
-# Bulk agent (uses strong model, legacy approach)
-# ============================================================================
-
-data_generation_agent = Agent(
-    model=f"openai:{settings.openai_model}",
-    deps_type=DataGenerationDeps,
-    output_type=GeneratedTestData,
-    system_prompt="""
-You are a test data generation expert. Your goal is to generate realistic mock data for API testing.
-
-You will be provided with:
-1. A test plan containing endpoint steps with their dependencies, body formats, and auth requirements
-2. An OpenAPI specification describing the API schema
-
-Your task:
-1. Analyze each test step in the plan
-2. For each step, generate appropriate mock data based on the OpenAPI schema
-3. Ensure data consistency across dependent steps
-4. Use realistic but fake data (names, emails, etc.)
-5. Follow any constraints defined in the OpenAPI spec (required fields, formats, enums, etc.)
-
-CRITICAL - Output structure for each MockedPayload:
-
-Each payload MUST have these fields populated correctly:
-- step_id: The ID of the test step (string)
-- request_body: The body for POST/PUT/PATCH requests (format depends on body_format), or null
-- path_params: Dict of path parameters extracted from the endpoint URL template
-- query_params: Dict of query parameters 
-- headers: Dict of additional headers (IMPORTANT for auth!)
-
-BODY FORMAT HANDLING:
-
-Each test step has a `body_format` field that tells you how to structure the request_body:
-
-1. body_format="json" (default):
-   - Standard JSON object for the request body
-   - Example: {"name": "John", "email": "john@example.com"}
-
-2. body_format="form_urlencoded" (OAuth2, login forms):
-   - Still use a dict, but it will be sent as form data
-   - For OAuth2 password flow: {"username": "user@example.com", "password": "pass123", "grant_type": "password"}
-   - For login: {"username": "admin", "password": "secret"}
-
-3. body_format="multipart" (file uploads):
-   - Use dict with file info, actual file handling done by executor
-   - Example: {"file": "test_file.txt", "description": "Test upload"}
-
-4. body_format="none":
-   - request_body should be null
-
-AUTHENTICATION HANDLING:
-
-Each test step has an `auth_requirement` field:
-
-1. auth_requirement="auth_provider":
-   - This is a login/token endpoint
-   - Generate credentials in request_body
-   - No auth header needed (this creates the token)
-
-2. auth_requirement="required":
-   - This endpoint needs authentication
-   - MUST include Authorization header with token from auth step
-   - Use placeholder: {"Authorization": "Bearer {{auth_step_id.access_token}}"}
-   - Check the depends_on to find the auth step ID
-
-3. auth_requirement="none" or "optional":
-   - No auth header needed
-
-EXAMPLES:
-
-1. OAuth2 Login (form_urlencoded, auth_provider):
-{
-  "step_id": "auth_login_success",
-  "request_body": {"username": "admin@example.com", "password": "SecurePass123!", "grant_type": "password"},
-  "path_params": {},
-  "query_params": {},
-  "headers": {}
-}
-
-2. Protected Endpoint (json, required auth):
-{
-  "step_id": "create_item",
-  "request_body": {"title": "Test Item", "description": "A test item"},
-  "path_params": {},
-  "query_params": {},
-  "headers": {"Authorization": "Bearer {{auth_login_success.access_token}}"}
-}
-
-3. GET with path param (none body, required auth):
-{
-  "step_id": "get_item_by_id",
-  "request_body": null,
-  "path_params": {"item_id": "{{create_item.id}}"},
-  "query_params": {},
-  "headers": {"Authorization": "Bearer {{auth_login_success.access_token}}"}
-}
-
-4. Public endpoint (no auth):
-{
-  "step_id": "health_check",
-  "request_body": null,
-  "path_params": {},
-  "query_params": {},
-  "headers": {}
-}
-
-5. File upload (multipart):
-{
-  "step_id": "upload_avatar",
-  "request_body": {"file": "avatar.jpg"},
-  "path_params": {},
-  "query_params": {},
-  "headers": {"Authorization": "Bearer {{auth_login_success.access_token}}"}
-}
-
-PLACEHOLDER SYNTAX:
-Use {{step_id.field_path}} to reference values from previous step responses.
-- {{auth_login_success.access_token}} - token from login response
-- {{create_item.id}} - ID from created item response
-- {{user_create.username}} - username from created user
-
-IMPORTANT RULES:
-1. ALWAYS check the endpoint template for path parameters (e.g., /items/{item_id})
-2. ALWAYS check the OpenAPI spec for query parameters
-3. ALWAYS add Authorization header for steps with auth_requirement="required"
-4. For form_urlencoded OAuth2, include grant_type if the spec requires it
-""",
-)
-
-
-@data_generation_agent.tool
-async def get_test_plan(ctx: RunContext[DataGenerationDeps]) -> str:
-    """Get the test plan to generate data for."""
-    return ctx.deps.test_plan.model_dump_json(indent=2)
-
-
-@data_generation_agent.tool
-async def get_openapi_spec(ctx: RunContext[DataGenerationDeps]) -> str:
-    """Get the OpenAPI specification for schema reference."""
-    return json.dumps(ctx.deps.openapi_spec, indent=2)
-
-
-@data_generation_agent.tool
-async def get_test_credentials(ctx: RunContext[DataGenerationDeps]) -> str:
-    """Get the credentials to use for authentication steps. Use these EXACT credentials for auth_provider steps."""
-    if ctx.deps.credentials:
-        return ctx.deps.credentials.to_prompt_context()
-    return "No credentials provided - generate realistic test credentials"
 
 
 # ============================================================================
@@ -409,77 +89,81 @@ def _infer_path_param_placeholder(
 ) -> str | None:
     """
     Infer a placeholder for a path parameter based on step dependencies.
-    
+
     Uses heuristics to match path parameter names to likely source steps.
     For example:
     - {user_id} with depends_on=["create_user"] -> {{create_user.id}}
     - {id} with depends_on=["create_item"] -> {{create_item.id}}
     - {pet_id} with depends_on=["add_pet"] -> {{add_pet.id}}
-    
+
     Args:
         param_name: The path parameter name (e.g., "user_id", "id")
         step: The current step
         test_plan: The full test plan
-        
+
     Returns:
         A placeholder string like "{{step_id.id}}" or None if no match
     """
     if not step.depends_on:
         return None
-    
+
     step_map = {s.id: s for s in test_plan.steps}
     param_lower = param_name.lower()
-    
+
     # Common ID-like parameter patterns
     is_id_param = (
-        param_lower in ("id", "Id", "ID") or
-        param_lower.endswith("_id") or
-        param_lower.endswith("id") or
-        param_lower.endswith("Id")
+        param_lower in ("id", "Id", "ID")
+        or param_lower.endswith("_id")
+        or param_lower.endswith("id")
+        or param_lower.endswith("Id")
     )
-    
+
     if not is_id_param:
         return None
-    
+
     # Extract the entity name from the parameter (e.g., "user" from "user_id")
     entity_name = None
     if param_lower.endswith("_id"):
         entity_name = param_lower[:-3]  # Remove "_id"
     elif param_lower.endswith("id") and len(param_lower) > 2:
         entity_name = param_lower[:-2]  # Remove "id"
-    
+
     # Try to find a matching dependency step
     for dep_id in step.depends_on:
         dep = step_map.get(dep_id)
         if not dep:
             continue
-        
+
         dep_id_lower = dep_id.lower()
-        
+
         # Skip auth provider steps for non-auth params
         if dep.auth_requirement == AuthRequirement.AUTH_PROVIDER:
             continue
-        
+
         # Match if:
         # 1. Param is just "id" and there's a creation-like dependency
         # 2. Entity name appears in the dependency step ID
         if param_lower == "id":
             # For generic "id", use the first non-auth dependency that looks like a creation
-            if any(verb in dep_id_lower for verb in ("create", "add", "post", "new", "register")):
+            if any(
+                verb in dep_id_lower
+                for verb in ("create", "add", "post", "new", "register")
+            ):
                 return f"{{{{{dep_id}.id}}}}"
         elif entity_name and entity_name in dep_id_lower:
             # Entity name matches dependency (e.g., "user" in "create_user")
             return f"{{{{{dep_id}.id}}}}"
-    
+
     # Fallback: if there's exactly one non-auth dependency, use it
     non_auth_deps = [
-        dep_id for dep_id in step.depends_on
-        if step_map.get(dep_id) and 
-           step_map[dep_id].auth_requirement != AuthRequirement.AUTH_PROVIDER
+        dep_id
+        for dep_id in step.depends_on
+        if step_map.get(dep_id)
+        and step_map[dep_id].auth_requirement != AuthRequirement.AUTH_PROVIDER
     ]
     if len(non_auth_deps) == 1:
         return f"{{{{{non_auth_deps[0]}.id}}}}"
-    
+
     return None
 
 
@@ -514,9 +198,7 @@ def get_generated_step_ids(test_data: GeneratedTestData) -> set[str]:
     return {payload.step_id for payload in test_data.payloads}
 
 
-def find_missing_step_ids(
-    test_plan: APIPlan, test_data: GeneratedTestData
-) -> set[str]:
+def find_missing_step_ids(test_plan: APIPlan, test_data: GeneratedTestData) -> set[str]:
     """
     Find step IDs that are in the test plan but missing from generated data.
 
@@ -532,9 +214,7 @@ def find_missing_step_ids(
     return required - generated
 
 
-def find_extra_step_ids(
-    test_plan: APIPlan, test_data: GeneratedTestData
-) -> set[str]:
+def find_extra_step_ids(test_plan: APIPlan, test_data: GeneratedTestData) -> set[str]:
     """
     Find step IDs in generated data that are not in the test plan.
 
@@ -564,9 +244,7 @@ def filter_valid_payloads(
         GeneratedTestData with only valid payloads
     """
     valid_step_ids = get_required_step_ids(test_plan)
-    valid_payloads = [
-        p for p in test_data.payloads if p.step_id in valid_step_ids
-    ]
+    valid_payloads = [p for p in test_data.payloads if p.step_id in valid_step_ids]
     return GeneratedTestData(payloads=valid_payloads)
 
 
@@ -609,7 +287,9 @@ def merge_test_data(
     return GeneratedTestData(payloads=sorted_payloads)
 
 
-def get_missing_steps(test_plan: APIPlan, test_data: GeneratedTestData) -> list[APIStep]:
+def get_missing_steps(
+    test_plan: APIPlan, test_data: GeneratedTestData
+) -> list[APIStep]:
     """
     Get the list of steps that are missing from the generated data.
 
@@ -624,6 +304,11 @@ def get_missing_steps(test_plan: APIPlan, test_data: GeneratedTestData) -> list[
     return [step for step in test_plan.steps if step.id in missing_ids]
 
 
+# ============================================================================
+# Deterministic data generation
+# ============================================================================
+
+
 def run_deterministic_data_generation(
     test_plan: APIPlan,
     openapi_spec: dict,
@@ -633,8 +318,12 @@ def run_deterministic_data_generation(
     """
     Generate test data deterministically using schema-based generators.
 
-    This is the "old-style" deterministic fuzzer that generates data
-    based purely on the OpenAPI schema without LLM involvement.
+    This generates data based purely on the OpenAPI schema without LLM involvement.
+    It handles:
+    - Schema-based data generation from OpenAPI spec
+    - Automatic placeholder generation for path params that reference dependencies
+    - Auth header placeholders for protected endpoints
+    - Credential injection for auth provider endpoints
 
     Args:
         test_plan: The test plan from the preliminary phase
@@ -652,7 +341,7 @@ def run_deterministic_data_generation(
 
     for step in test_plan.steps:
         # Get request body schema and generate data
-        request_body: dict[str, Any] | None = None
+        request_body: dict[str, Any] | list | None = None
         body_schema = parser.get_request_body_schema(step.endpoint, step.method.lower())
 
         if body_schema:
@@ -663,20 +352,23 @@ def run_deterministic_data_generation(
             # Override with actual credentials for auth endpoints
             if request_body is None:
                 request_body = {}
-            if credentials.username:
-                # Try to set username in various possible field names
-                for field in ["username", "email", "user", "login"]:
-                    if field in request_body or not request_body:
-                        request_body[field] = credentials.username
-                        break
-            if credentials.password:
-                request_body["password"] = credentials.password
-            # Add grant_type for OAuth2 flows
-            params = parser.get_parameters_schema(step.endpoint, step.method.lower())
-            form_params = params.get("formData", [])
-            for param in form_params:
-                if param.get("name") == "grant_type":
-                    request_body["grant_type"] = "password"
+            if isinstance(request_body, dict):
+                if credentials.username:
+                    # Try to set username in various possible field names
+                    for field in ["username", "email", "user", "login"]:
+                        if field in request_body or not request_body:
+                            request_body[field] = credentials.username
+                            break
+                if credentials.password:
+                    request_body["password"] = credentials.password
+                # Add grant_type for OAuth2 flows
+                params = parser.get_parameters_schema(
+                    step.endpoint, step.method.lower()
+                )
+                form_params = params.get("formData", [])
+                for param in form_params:
+                    if param.get("name") == "grant_type":
+                        request_body["grant_type"] = "password"
 
         # Generate path parameters
         path_params: dict[str, Any] = {}
@@ -692,7 +384,9 @@ def run_deterministic_data_generation(
                     path_params[param_name] = placeholder
                 else:
                     # Fall back to deterministic generation
-                    param_schema = param.get("schema", param)  # Swagger 2.0 vs OpenAPI 3.x
+                    param_schema = param.get(
+                        "schema", param
+                    )  # Swagger 2.0 vs OpenAPI 3.x
                     path_params[param_name] = generate_data_from_schema(
                         param_schema, parser, generator, param_name
                     )
@@ -739,361 +433,38 @@ def run_deterministic_data_generation(
     return GeneratedTestData(payloads=payloads)
 
 
-def _generate_single_step_deterministic(
-    step: APIStep,
-    openapi_spec: dict,
-    credentials: APICredentials | None,
-    parser: OpenAPISchemaParser,
-    generator: DeterministicGenerator,
-    test_plan: APIPlan,
-) -> MockedPayload:
-    """
-    Generate data for a single step deterministically.
-    
-    This is a helper function for hybrid generation mode.
-    """
-    # Get request body schema and generate data
-    request_body: dict[str, Any] | None = None
-    body_schema = parser.get_request_body_schema(step.endpoint, step.method.lower())
-
-    if body_schema:
-        request_body = generate_data_from_schema(body_schema, parser, generator)
-
-    # Handle auth provider steps - use credentials
-    if step.auth_requirement == AuthRequirement.AUTH_PROVIDER and credentials:
-        if request_body is None:
-            request_body = {}
-        if credentials.username:
-            for field in ["username", "email", "user", "login"]:
-                if field in request_body or not request_body:
-                    request_body[field] = credentials.username
-                    break
-        if credentials.password:
-            request_body["password"] = credentials.password
-        params = parser.get_parameters_schema(step.endpoint, step.method.lower())
-        form_params = params.get("formData", [])
-        for param in form_params:
-            if param.get("name") == "grant_type":
-                request_body["grant_type"] = "password"
-
-    # Generate path parameters
-    path_params: dict[str, Any] = {}
-    param_names = _extract_path_params(step.endpoint)
-    params_schema = parser.get_parameters_schema(step.endpoint, step.method.lower())
-
-    for param in params_schema.get("path", []):
-        param_name = param.get("name", "")
-        if param_name in param_names:
-            param_schema = param.get("schema", param)
-            path_params[param_name] = generate_data_from_schema(
-                param_schema, parser, generator, param_name
-            )
-
-    # Generate query parameters (required only)
-    query_params: dict[str, Any] = {}
-    for param in params_schema.get("query", []):
-        if param.get("required", False):
-            param_name = param.get("name", "")
-            param_schema = param.get("schema", param)
-            query_params[param_name] = generate_data_from_schema(
-                param_schema, parser, generator, param_name
-            )
-
-    # Generate headers
-    headers: dict[str, str] = {}
-
-    # Add authorization header for protected endpoints
-    if step.auth_requirement == AuthRequirement.REQUIRED:
-        auth_step_id = _find_auth_provider_step(step.id, test_plan, step.depends_on)
-        if auth_step_id:
-            headers["Authorization"] = f"Bearer {{{{{auth_step_id}.access_token}}}}"
-
-    # Add required header parameters
-    for param in params_schema.get("header", []):
-        if param.get("required", False):
-            param_name = param.get("name", "")
-            param_schema = param.get("schema", param)
-            value = generate_data_from_schema(
-                param_schema, parser, generator, param_name
-            )
-            headers[param_name] = str(value)
-
-    return MockedPayload(
-        step_id=step.id,
-        request_body=request_body,
-        path_params=path_params,
-        query_params=query_params,
-        headers=headers,
-    )
+# ============================================================================
+# Main entry point
+# ============================================================================
 
 
 async def run_data_generation_phase(
     test_plan: APIPlan,
     openapi_spec: dict,
     credentials: APICredentials | None = None,
-    use_llm: bool = False,
-    per_step: bool = True,
     seed: int | str | None = None,
-    max_concurrent: int | None = None,
-    request_delay: float | None = None,
 ) -> GeneratedTestData:
     """
     Run the data generation phase: generate mock data for all test steps.
 
-    By default, uses deterministic generation which is fast and handles:
+    Uses deterministic generation which is fast and handles:
     - Schema-based data generation from OpenAPI spec
     - Automatic placeholder generation for path params that reference dependencies
-    - Auth header placeholders for protected endpoints  
+    - Auth header placeholders for protected endpoints
     - Credential injection for auth provider endpoints
-
-    LLM-based generation is available for complex cases but is optional.
 
     Args:
         test_plan: The test plan from the preliminary phase
         openapi_spec: The OpenAPI specification
         credentials: Optional credentials to use for authentication steps
-        use_llm: If True, use LLM-based generation; if False (default), use deterministic
-        per_step: If True and use_llm=True, generate data per-step with weak model.
-                  If False and use_llm=True, generate all data in one bulk request with strong model.
         seed: Optional seed for deterministic generation
-        max_concurrent: Maximum number of concurrent LLM requests (None = unlimited).
-        request_delay: Minimum delay (in seconds) between LLM requests.
 
     Returns:
         GeneratedTestData containing mock payloads for each test step
     """
-    if not use_llm:
-        return run_deterministic_data_generation(
-            test_plan=test_plan,
-            openapi_spec=openapi_spec,
-            credentials=credentials,
-            seed=seed,
-        )
-
-    if per_step:
-        # Per-step generation with weak model (parallel)
-        return await _run_per_step_generation(
-            test_plan=test_plan,
-            openapi_spec=openapi_spec,
-            credentials=credentials,
-            max_concurrent=max_concurrent,
-            request_delay=request_delay if request_delay is not None else settings.request_delay,
-        )
-
-    # Bulk generation with strong model (legacy mode)
-    return await _run_bulk_generation(
+    return run_deterministic_data_generation(
         test_plan=test_plan,
         openapi_spec=openapi_spec,
         credentials=credentials,
+        seed=seed,
     )
-
-
-async def _run_per_step_generation(
-    test_plan: APIPlan,
-    openapi_spec: dict,
-    credentials: APICredentials | None = None,
-    max_concurrent: int | None = None,
-    request_delay: float = 0.0,
-) -> GeneratedTestData:
-    """
-    Generate test data for all steps in parallel using the weak model.
-
-    This approach is fast and reliable:
-    1. Each request is small and focused
-    2. Requests run in parallel for speed
-    3. Optional throttling via max_concurrent
-    4. Optional delay between requests via request_delay
-    5. Guarantees one payload per step (with fallback on failure)
-
-    Args:
-        test_plan: The test plan
-        openapi_spec: The OpenAPI specification
-        credentials: Optional credentials
-        max_concurrent: Max parallel requests (None = unlimited)
-        request_delay: Minimum delay (seconds) between requests (default: 0.0)
-    """
-    total_steps = len(test_plan.steps)
-    logger.info(
-        "Generating data for %d steps in parallel (max_concurrent=%s, delay=%.2fs)",
-        total_steps,
-        max_concurrent or "unlimited",
-        request_delay,
-    )
-
-    # Find the first auth provider step for use in subsequent steps
-    auth_provider_step_id: str | None = None
-    for step in test_plan.steps:
-        if step.auth_requirement == AuthRequirement.AUTH_PROVIDER:
-            auth_provider_step_id = step.id
-            break
-
-    # Build list of all step IDs for placeholder context
-    all_step_ids = [step.id for step in test_plan.steps]
-
-    # Create semaphore for throttling (if specified)
-    semaphore = asyncio.Semaphore(max_concurrent) if max_concurrent else None
-
-    async def generate_with_throttle(step: APIStep, index: int) -> MockedPayload:
-        """Generate data for a single step, with optional throttling and delay."""
-        async def _generate() -> MockedPayload:
-            # Apply delay before making the request (skip for first request)
-            if request_delay > 0 and index > 0:
-                await asyncio.sleep(request_delay)
-
-            # Find the auth provider for this specific step
-            step_auth_provider = _find_auth_provider_step(
-                step.id, test_plan, step.depends_on
-            )
-            if step_auth_provider is None:
-                step_auth_provider = auth_provider_step_id
-
-            # Use all previous step IDs as context for placeholders
-            previous_ids = all_step_ids[:index]
-
-            try:
-                logger.debug("Generating data for step %d/%d: %s", index + 1, total_steps, step.id)
-                payload = await _generate_single_step_data(
-                    step=step,
-                    openapi_spec=openapi_spec,
-                    credentials=credentials,
-                    previous_step_ids=previous_ids,
-                    auth_provider_step_id=step_auth_provider,
-                )
-                logger.debug("Completed step %d/%d: %s", index + 1, total_steps, step.id)
-                return payload
-            except Exception as e:
-                logger.error("Failed to generate data for step %s: %s", step.id, e)
-                # Return fallback payload
-                return MockedPayload(
-                    step_id=step.id,
-                    request_body=None,
-                    path_params={},
-                    query_params={},
-                    headers={},
-                )
-
-        if semaphore:
-            async with semaphore:
-                return await _generate()
-        else:
-            return await _generate()
-
-    # Run all generations in parallel
-    tasks = [
-        generate_with_throttle(step, i)
-        for i, step in enumerate(test_plan.steps)
-    ]
-    payloads = await asyncio.gather(*tasks)
-
-    # Count failures (payloads with empty request_body where one was expected)
-    failed_count = sum(
-        1 for p, s in zip(payloads, test_plan.steps)
-        if p.request_body is None and s.method in ("POST", "PUT", "PATCH")
-    )
-
-    if failed_count > 0:
-        logger.warning(
-            "Failed to generate proper data for %d step(s) (using fallback)",
-            failed_count,
-        )
-    else:
-        logger.info("Successfully generated data for all %d step(s)", total_steps)
-
-    return GeneratedTestData(payloads=list(payloads))
-
-
-async def _run_bulk_generation(
-    test_plan: APIPlan,
-    openapi_spec: dict,
-    credentials: APICredentials | None = None,
-) -> GeneratedTestData:
-    """
-    Generate test data for all steps in one bulk request using the strong model.
-
-    This approach includes validation and retry logic to ensure all steps
-    in the test plan have generated data.
-    """
-    deps = DataGenerationDeps(
-        test_plan=test_plan,
-        openapi_spec=openapi_spec,
-        credentials=credentials,
-    )
-
-    prompt = """
-    Generate mock data for all test steps in the test plan. 
-    Use the tools to retrieve the test plan, OpenAPI specification, and test credentials.
-    
-    IMPORTANT: For authentication steps (auth_requirement="auth_provider"), you MUST use 
-    the exact credentials returned by the get_test_credentials tool. Do not make up 
-    different usernames or passwords.
-    
-    Ensure data consistency across dependent steps.
-    """
-
-    result = await data_generation_agent.run(prompt, deps=deps)
-    current_data = result.output
-
-    # Filter out any extra payloads not in the test plan
-    extra_ids = find_extra_step_ids(test_plan, current_data)
-    if extra_ids:
-        logger.warning(
-            "Removing %d extra payloads not in test plan: %s",
-            len(extra_ids),
-            sorted(extra_ids),
-        )
-        current_data = filter_valid_payloads(test_plan, current_data)
-
-    # Check for missing steps and retry if needed
-    for retry_num in range(1, MAX_DATA_GENERATION_RETRIES + 1):
-        missing_ids = find_missing_step_ids(test_plan, current_data)
-
-        if not missing_ids:
-            logger.info("Full data coverage achieved after %d attempt(s)", retry_num)
-            break
-
-        logger.info(
-            "Attempt %d: Found %d missing step(s), retrying...",
-            retry_num,
-            len(missing_ids),
-        )
-
-        # Build prompt for missing steps only
-        missing_steps = get_missing_steps(test_plan, current_data)
-        missing_list = "\n".join(
-            f"  - {step.id}: {step.method} {step.endpoint}"
-            for step in missing_steps
-        )
-
-        retry_prompt = f"""Generate mock data for the following steps that are missing from the previous generation.
-
-Missing steps:
-{missing_list}
-
-Use the same format as before. Only generate data for these specific steps.
-
-IMPORTANT: Use the exact step_id values listed above.
-"""
-
-        try:
-            retry_result = await data_generation_agent.run(retry_prompt, deps=deps)
-            additional_data = retry_result.output
-            current_data = merge_test_data(current_data, additional_data, test_plan)
-        except Exception as e:
-            logger.warning("Retry %d failed: %s", retry_num, e)
-            continue
-
-    # Log final coverage status
-    final_missing = find_missing_step_ids(test_plan, current_data)
-    if final_missing:
-        logger.warning(
-            "Could not generate data for %d step(s): %s",
-            len(final_missing),
-            sorted(final_missing),
-        )
-    else:
-        logger.info(
-            "Generated data for all %d step(s) in test plan",
-            len(test_plan.steps),
-        )
-
-    return current_data

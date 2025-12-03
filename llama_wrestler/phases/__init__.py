@@ -14,12 +14,14 @@ from llama_wrestler.phases.test_execution import (
     StepResult,
     sanitize_dependencies,
 )
-from llama_wrestler.phases.step_analysis import (
-    run_analysis_phase,
-    analyze_step_dependencies,
-    AnalysisResult,
-    StepAnalysis,
-    FieldPlaceholder,
+from llama_wrestler.phases.step_classification import (
+    classify_step,
+    classify_steps,
+    run_classification_phase,
+    StepComplexity,
+    ComplexityReason,
+    ClassificationResult,
+    StepClassification,
 )
 
 __all__ = [
@@ -36,9 +38,12 @@ __all__ = [
     "APIExecutionResult",
     "StepResult",
     "sanitize_dependencies",
-    "run_analysis_phase",
-    "analyze_step_dependencies",
-    "AnalysisResult",
-    "StepAnalysis",
-    "FieldPlaceholder",
+    # Step classification (for potential future use)
+    "classify_step",
+    "classify_steps",
+    "run_classification_phase",
+    "StepComplexity",
+    "ComplexityReason",
+    "ClassificationResult",
+    "StepClassification",
 ]

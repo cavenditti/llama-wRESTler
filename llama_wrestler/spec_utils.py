@@ -260,7 +260,7 @@ def extract_security_requirements(spec: dict[str, Any]) -> dict[str, set[str]]:
     global_security: list[dict[str, Any]] = spec.get("security", [])
 
     # Determine spec version
-    is_openapi3 = spec.get("openapi", "").startswith("3")
+    # is_openapi3 = spec.get("openapi", "").startswith("3")
 
     paths = spec.get("paths", {})
 
@@ -303,25 +303,6 @@ def extract_security_requirements(spec: dict[str, Any]) -> dict[str, set[str]]:
     return requirements
 
 
-def get_security_definitions(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """
-    Get security scheme definitions from an OpenAPI spec.
-
-    Args:
-        spec: The OpenAPI spec dictionary
-
-    Returns:
-        Dict mapping security scheme names to their definitions
-    """
-    # OpenAPI 3.x
-    if spec.get("openapi", "").startswith("3"):
-        components = spec.get("components", {})
-        return components.get("securitySchemes", {})
-
-    # Swagger 2.0
-    return spec.get("securityDefinitions", {})
-
-
 def validate_auth_requirements(plan: APIPlan, spec: dict[str, Any]) -> list[str]:
     """
     Validate that the auth requirements in the test plan match the OpenAPI spec.
@@ -336,12 +317,8 @@ def validate_auth_requirements(plan: APIPlan, spec: dict[str, Any]) -> list[str]
     warnings: list[str] = []
 
     spec_requirements = extract_security_requirements(spec)
-    security_defs = get_security_definitions(spec)
 
     for step in plan.steps:
-        # Normalize the endpoint path for comparison
-        endpoint_key = f"{step.method.upper()} {step.endpoint}"
-
         # Try to find a matching endpoint in the spec
         # Handle path parameters (e.g., /users/{id} vs /users/123)
         matching_spec_key = None

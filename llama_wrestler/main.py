@@ -145,7 +145,7 @@ async def run():
     if not args.no_cache:
         cached_plan = find_cached_test_plan(output_dir, spec_hash)
         if cached_plan:
-            print(f"Found cached test plan from previous run!")
+            print("Found cached test plan from previous run!")
 
     if cached_plan:
         # Use cached plan

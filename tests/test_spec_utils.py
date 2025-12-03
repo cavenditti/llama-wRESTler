@@ -2,11 +2,8 @@
 Tests for spec_utils module.
 """
 
-import json
-import pytest
 from pathlib import Path
 import tempfile
-import shutil
 
 from llama_wrestler.spec_utils import (
     normalize_spec,
@@ -21,7 +18,7 @@ from llama_wrestler.spec_utils import (
     validate_auth_requirements,
     suggest_auth_provider_steps,
 )
-from llama_wrestler.models import APIPlan, APIStep, AuthRequirement, BodyFormat
+from llama_wrestler.models import APIPlan, APIStep, AuthRequirement
 
 
 class TestNormalizeSpec:

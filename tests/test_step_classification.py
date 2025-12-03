@@ -2,8 +2,6 @@
 Tests for step classification module.
 """
 
-import pytest
-
 from llama_wrestler.phases.step_classification import (
     classify_step,
     classify_steps,
@@ -35,9 +33,9 @@ class TestClassifyStep:
             expected_status=200,
             auth_requirement=AuthRequirement.NONE,
         )
-        
+
         result = classify_step(step, {"get_users"})
-        
+
         assert result.complexity == StepComplexity.SIMPLE
         assert result.reasons == []
 
@@ -51,9 +49,9 @@ class TestClassifyStep:
             expected_status=201,
             auth_requirement=AuthRequirement.NONE,
         )
-        
+
         result = classify_step(step, {"create_user"})
-        
+
         assert result.complexity == StepComplexity.SIMPLE
         assert result.reasons == []
 
@@ -68,9 +66,9 @@ class TestClassifyStep:
             depends_on=["create_user"],
             auth_requirement=AuthRequirement.NONE,
         )
-        
+
         result = classify_step(step, {"create_user", "get_user"})
-        
+
         assert result.complexity == StepComplexity.COMPLEX
         assert ComplexityReason.HAS_DEPENDENCIES in result.reasons
 
@@ -84,9 +82,9 @@ class TestClassifyStep:
             expected_status=200,
             auth_requirement=AuthRequirement.AUTH_PROVIDER,
         )
-        
+
         result = classify_step(step, {"login"}, has_credentials=True)
-        
+
         assert result.complexity == StepComplexity.COMPLEX
         assert ComplexityReason.IS_AUTH_PROVIDER in result.reasons
 
@@ -100,9 +98,9 @@ class TestClassifyStep:
             expected_status=200,
             auth_requirement=AuthRequirement.AUTH_PROVIDER,
         )
-        
+
         result = classify_step(step, {"login"}, has_credentials=False)
-        
+
         # Without credentials, auth_provider doesn't need special handling
         assert result.complexity == StepComplexity.SIMPLE
 
@@ -116,9 +114,9 @@ class TestClassifyStep:
             expected_status=200,
             auth_requirement=AuthRequirement.REQUIRED,
         )
-        
+
         result = classify_step(step, {"get_profile"})
-        
+
         # Auth requirement alone doesn't make a step complex
         # The deterministic generator can add the auth header placeholder
         assert result.complexity == StepComplexity.SIMPLE
@@ -134,9 +132,9 @@ class TestClassifyStep:
             expected_status=201,
             body_format=BodyFormat.MULTIPART,
         )
-        
+
         result = classify_step(step, {"upload_file"})
-        
+
         assert result.complexity == StepComplexity.COMPLEX
         assert ComplexityReason.MULTIPART_UPLOAD in result.reasons
 
@@ -150,9 +148,9 @@ class TestClassifyStep:
             expected_status=200,
             payload_description="Use the ID from create_user response",
         )
-        
+
         result = classify_step(step, {"create_user", "update_user"})
-        
+
         assert result.complexity == StepComplexity.COMPLEX
         assert ComplexityReason.REFERENCES_PREVIOUS in result.reasons
 
@@ -166,9 +164,9 @@ class TestClassifyStep:
             expected_status=204,
             payload_description="Use {{create_user.id}} as the user ID",
         )
-        
+
         result = classify_step(step, {"create_user", "delete_user"})
-        
+
         assert result.complexity == StepComplexity.COMPLEX
         assert ComplexityReason.REFERENCES_PREVIOUS in result.reasons
 
@@ -183,9 +181,9 @@ class TestClassifyStep:
             depends_on=["create_user"],
             body_format=BodyFormat.MULTIPART,
         )
-        
+
         result = classify_step(step, {"create_user", "upload_avatar"})
-        
+
         assert result.complexity == StepComplexity.COMPLEX
         assert ComplexityReason.HAS_DEPENDENCIES in result.reasons
         assert ComplexityReason.MULTIPART_UPLOAD in result.reasons
@@ -200,13 +198,25 @@ class TestClassifySteps:
             summary="Test plan",
             base_url="http://localhost",
             steps=[
-                APIStep(id="a", description="A", endpoint="/a", method="GET", expected_status=200),
-                APIStep(id="b", description="B", endpoint="/b", method="POST", expected_status=201),
-            ]
+                APIStep(
+                    id="a",
+                    description="A",
+                    endpoint="/a",
+                    method="GET",
+                    expected_status=200,
+                ),
+                APIStep(
+                    id="b",
+                    description="B",
+                    endpoint="/b",
+                    method="POST",
+                    expected_status=201,
+                ),
+            ],
         )
-        
+
         result = classify_steps(plan)
-        
+
         assert result.simple_count == 2
         assert result.complex_count == 0
 
@@ -216,14 +226,26 @@ class TestClassifySteps:
             summary="Test plan",
             base_url="http://localhost",
             steps=[
-                APIStep(id="a", description="A", endpoint="/a", method="GET", expected_status=200),
-                APIStep(id="b", description="B", endpoint="/b", method="POST", expected_status=201,
-                       depends_on=["a"]),
-            ]
+                APIStep(
+                    id="a",
+                    description="A",
+                    endpoint="/a",
+                    method="GET",
+                    expected_status=200,
+                ),
+                APIStep(
+                    id="b",
+                    description="B",
+                    endpoint="/b",
+                    method="POST",
+                    expected_status=201,
+                    depends_on=["a"],
+                ),
+            ],
         )
-        
+
         result = classify_steps(plan)
-        
+
         assert result.simple_count == 1
         assert result.complex_count == 1
 
@@ -233,16 +255,34 @@ class TestClassifySteps:
             summary="Test plan",
             base_url="http://localhost",
             steps=[
-                APIStep(id="simple1", description="S1", endpoint="/s1", method="GET", expected_status=200),
-                APIStep(id="complex1", description="C1", endpoint="/c1", method="POST", expected_status=200,
-                       depends_on=["simple1"]),
-                APIStep(id="simple2", description="S2", endpoint="/s2", method="GET", expected_status=200),
-            ]
+                APIStep(
+                    id="simple1",
+                    description="S1",
+                    endpoint="/s1",
+                    method="GET",
+                    expected_status=200,
+                ),
+                APIStep(
+                    id="complex1",
+                    description="C1",
+                    endpoint="/c1",
+                    method="POST",
+                    expected_status=200,
+                    depends_on=["simple1"],
+                ),
+                APIStep(
+                    id="simple2",
+                    description="S2",
+                    endpoint="/s2",
+                    method="GET",
+                    expected_status=200,
+                ),
+            ],
         )
-        
+
         result = classify_steps(plan)
         simple_ids = result.get_simple_step_ids()
-        
+
         assert simple_ids == {"simple1", "simple2"}
 
     def test_get_complex_step_ids(self):
@@ -251,15 +291,27 @@ class TestClassifySteps:
             summary="Test plan",
             base_url="http://localhost",
             steps=[
-                APIStep(id="simple1", description="S1", endpoint="/s1", method="GET", expected_status=200),
-                APIStep(id="complex1", description="C1", endpoint="/c1", method="POST", expected_status=200,
-                       depends_on=["simple1"]),
-            ]
+                APIStep(
+                    id="simple1",
+                    description="S1",
+                    endpoint="/s1",
+                    method="GET",
+                    expected_status=200,
+                ),
+                APIStep(
+                    id="complex1",
+                    description="C1",
+                    endpoint="/c1",
+                    method="POST",
+                    expected_status=200,
+                    depends_on=["simple1"],
+                ),
+            ],
         )
-        
+
         result = classify_steps(plan)
         complex_ids = result.get_complex_step_ids()
-        
+
         assert complex_ids == {"complex1"}
 
 
@@ -270,14 +322,19 @@ class TestClassificationResult:
         """Test is_simple method."""
         result = ClassificationResult(
             classifications=[
-                StepClassification(step_id="a", complexity=StepComplexity.SIMPLE, reasons=[]),
-                StepClassification(step_id="b", complexity=StepComplexity.COMPLEX, 
-                                 reasons=[ComplexityReason.HAS_DEPENDENCIES]),
+                StepClassification(
+                    step_id="a", complexity=StepComplexity.SIMPLE, reasons=[]
+                ),
+                StepClassification(
+                    step_id="b",
+                    complexity=StepComplexity.COMPLEX,
+                    reasons=[ComplexityReason.HAS_DEPENDENCIES],
+                ),
             ],
             simple_count=1,
             complex_count=1,
         )
-        
+
         assert result.is_simple("a") is True
         assert result.is_simple("b") is False
         assert result.is_simple("c") is False
@@ -286,14 +343,19 @@ class TestClassificationResult:
         """Test is_complex method."""
         result = ClassificationResult(
             classifications=[
-                StepClassification(step_id="a", complexity=StepComplexity.SIMPLE, reasons=[]),
-                StepClassification(step_id="b", complexity=StepComplexity.COMPLEX,
-                                 reasons=[ComplexityReason.HAS_DEPENDENCIES]),
+                StepClassification(
+                    step_id="a", complexity=StepComplexity.SIMPLE, reasons=[]
+                ),
+                StepClassification(
+                    step_id="b",
+                    complexity=StepComplexity.COMPLEX,
+                    reasons=[ComplexityReason.HAS_DEPENDENCIES],
+                ),
             ],
             simple_count=1,
             complex_count=1,
         )
-        
+
         assert result.is_complex("a") is False
         assert result.is_complex("b") is True
 
@@ -307,14 +369,20 @@ class TestRunClassificationPhase:
             summary="Test",
             base_url="http://localhost",
             steps=[
-                APIStep(id="login", description="Login", endpoint="/login", method="POST",
-                       expected_status=200, auth_requirement=AuthRequirement.AUTH_PROVIDER),
-            ]
+                APIStep(
+                    id="login",
+                    description="Login",
+                    endpoint="/login",
+                    method="POST",
+                    expected_status=200,
+                    auth_requirement=AuthRequirement.AUTH_PROVIDER,
+                ),
+            ],
         )
-        
+
         creds = APICredentials(username="test", password="pass")
         result = run_classification_phase(plan, credentials=creds)
-        
+
         assert result.complex_count == 1
         assert result.is_complex("login")
 
@@ -324,13 +392,19 @@ class TestRunClassificationPhase:
             summary="Test",
             base_url="http://localhost",
             steps=[
-                APIStep(id="login", description="Login", endpoint="/login", method="POST",
-                       expected_status=200, auth_requirement=AuthRequirement.AUTH_PROVIDER),
-            ]
+                APIStep(
+                    id="login",
+                    description="Login",
+                    endpoint="/login",
+                    method="POST",
+                    expected_status=200,
+                    auth_requirement=AuthRequirement.AUTH_PROVIDER,
+                ),
+            ],
         )
-        
+
         result = run_classification_phase(plan, credentials=None)
-        
+
         # Without credentials, auth_provider doesn't trigger complexity
         assert result.simple_count == 1
 
@@ -348,9 +422,9 @@ class TestComplexPayloadDetection:
             expected_status=200,
             payload_description="Include field X depending on user type",
         )
-        
+
         result = classify_step(step, {"test"})
-        
+
         assert ComplexityReason.COMPLEX_PAYLOAD in result.reasons
 
     def test_based_on_payload(self):
@@ -363,7 +437,7 @@ class TestComplexPayloadDetection:
             expected_status=200,
             payload_description="Set value based on previous response",
         )
-        
+
         result = classify_step(step, {"test"})
-        
+
         assert ComplexityReason.COMPLEX_PAYLOAD in result.reasons

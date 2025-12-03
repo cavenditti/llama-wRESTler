@@ -4,14 +4,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     openai_api_key: str
     openai_base_url: str | None = None
-    openai_model: str = "gpt-4o"
-    openai_weak_model: str = (
-        "gpt-4o-mini"  # Weaker/cheaper model for per-step data generation
-    )
-    max_concurrent_requests: int | None = None  # Max parallel LLM requests (None = unlimited)
-    request_delay: float = 0.0  # Minimum delay (seconds) between LLM requests (for rate limiting)
+    openai_model: str = "gpt-4o"  # Used for test plan generation (preliminary phase)
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",  # Ignore extra env vars not defined in the model
+    )
 
 
 settings = Settings()
