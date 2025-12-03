@@ -30,8 +30,8 @@ class MockedPayload(BaseModel):
     """Mocked data for a single test step."""
 
     step_id: str = Field(description="The ID of the test step this payload is for")
-    request_body: dict | None = Field(
-        None, description="The request body to send, if applicable"
+    request_body: dict | list | None = Field(
+        None, description="The request body to send, if applicable (can be dict or list)"
     )
     path_params: dict[str, Any] = Field(
         default_factory=dict,
@@ -402,6 +402,87 @@ def _find_auth_provider_step(
     return None
 
 
+def _infer_path_param_placeholder(
+    param_name: str,
+    step: APIStep,
+    test_plan: APIPlan,
+) -> str | None:
+    """
+    Infer a placeholder for a path parameter based on step dependencies.
+    
+    Uses heuristics to match path parameter names to likely source steps.
+    For example:
+    - {user_id} with depends_on=["create_user"] -> {{create_user.id}}
+    - {id} with depends_on=["create_item"] -> {{create_item.id}}
+    - {pet_id} with depends_on=["add_pet"] -> {{add_pet.id}}
+    
+    Args:
+        param_name: The path parameter name (e.g., "user_id", "id")
+        step: The current step
+        test_plan: The full test plan
+        
+    Returns:
+        A placeholder string like "{{step_id.id}}" or None if no match
+    """
+    if not step.depends_on:
+        return None
+    
+    step_map = {s.id: s for s in test_plan.steps}
+    param_lower = param_name.lower()
+    
+    # Common ID-like parameter patterns
+    is_id_param = (
+        param_lower in ("id", "Id", "ID") or
+        param_lower.endswith("_id") or
+        param_lower.endswith("id") or
+        param_lower.endswith("Id")
+    )
+    
+    if not is_id_param:
+        return None
+    
+    # Extract the entity name from the parameter (e.g., "user" from "user_id")
+    entity_name = None
+    if param_lower.endswith("_id"):
+        entity_name = param_lower[:-3]  # Remove "_id"
+    elif param_lower.endswith("id") and len(param_lower) > 2:
+        entity_name = param_lower[:-2]  # Remove "id"
+    
+    # Try to find a matching dependency step
+    for dep_id in step.depends_on:
+        dep = step_map.get(dep_id)
+        if not dep:
+            continue
+        
+        dep_id_lower = dep_id.lower()
+        
+        # Skip auth provider steps for non-auth params
+        if dep.auth_requirement == AuthRequirement.AUTH_PROVIDER:
+            continue
+        
+        # Match if:
+        # 1. Param is just "id" and there's a creation-like dependency
+        # 2. Entity name appears in the dependency step ID
+        if param_lower == "id":
+            # For generic "id", use the first non-auth dependency that looks like a creation
+            if any(verb in dep_id_lower for verb in ("create", "add", "post", "new", "register")):
+                return f"{{{{{dep_id}.id}}}}"
+        elif entity_name and entity_name in dep_id_lower:
+            # Entity name matches dependency (e.g., "user" in "create_user")
+            return f"{{{{{dep_id}.id}}}}"
+    
+    # Fallback: if there's exactly one non-auth dependency, use it
+    non_auth_deps = [
+        dep_id for dep_id in step.depends_on
+        if step_map.get(dep_id) and 
+           step_map[dep_id].auth_requirement != AuthRequirement.AUTH_PROVIDER
+    ]
+    if len(non_auth_deps) == 1:
+        return f"{{{{{non_auth_deps[0]}.id}}}}"
+    
+    return None
+
+
 # ============================================================================
 # Validation and coverage functions
 # ============================================================================
@@ -605,10 +686,16 @@ def run_deterministic_data_generation(
         for param in params_schema.get("path", []):
             param_name = param.get("name", "")
             if param_name in param_names:
-                param_schema = param.get("schema", param)  # Swagger 2.0 vs OpenAPI 3.x
-                path_params[param_name] = generate_data_from_schema(
-                    param_schema, parser, generator, param_name
-                )
+                # First, try to infer a placeholder from dependencies
+                placeholder = _infer_path_param_placeholder(param_name, step, test_plan)
+                if placeholder:
+                    path_params[param_name] = placeholder
+                else:
+                    # Fall back to deterministic generation
+                    param_schema = param.get("schema", param)  # Swagger 2.0 vs OpenAPI 3.x
+                    path_params[param_name] = generate_data_from_schema(
+                        param_schema, parser, generator, param_name
+                    )
 
         # Generate query parameters (required only)
         query_params: dict[str, Any] = {}
@@ -652,11 +739,99 @@ def run_deterministic_data_generation(
     return GeneratedTestData(payloads=payloads)
 
 
+def _generate_single_step_deterministic(
+    step: APIStep,
+    openapi_spec: dict,
+    credentials: APICredentials | None,
+    parser: OpenAPISchemaParser,
+    generator: DeterministicGenerator,
+    test_plan: APIPlan,
+) -> MockedPayload:
+    """
+    Generate data for a single step deterministically.
+    
+    This is a helper function for hybrid generation mode.
+    """
+    # Get request body schema and generate data
+    request_body: dict[str, Any] | None = None
+    body_schema = parser.get_request_body_schema(step.endpoint, step.method.lower())
+
+    if body_schema:
+        request_body = generate_data_from_schema(body_schema, parser, generator)
+
+    # Handle auth provider steps - use credentials
+    if step.auth_requirement == AuthRequirement.AUTH_PROVIDER and credentials:
+        if request_body is None:
+            request_body = {}
+        if credentials.username:
+            for field in ["username", "email", "user", "login"]:
+                if field in request_body or not request_body:
+                    request_body[field] = credentials.username
+                    break
+        if credentials.password:
+            request_body["password"] = credentials.password
+        params = parser.get_parameters_schema(step.endpoint, step.method.lower())
+        form_params = params.get("formData", [])
+        for param in form_params:
+            if param.get("name") == "grant_type":
+                request_body["grant_type"] = "password"
+
+    # Generate path parameters
+    path_params: dict[str, Any] = {}
+    param_names = _extract_path_params(step.endpoint)
+    params_schema = parser.get_parameters_schema(step.endpoint, step.method.lower())
+
+    for param in params_schema.get("path", []):
+        param_name = param.get("name", "")
+        if param_name in param_names:
+            param_schema = param.get("schema", param)
+            path_params[param_name] = generate_data_from_schema(
+                param_schema, parser, generator, param_name
+            )
+
+    # Generate query parameters (required only)
+    query_params: dict[str, Any] = {}
+    for param in params_schema.get("query", []):
+        if param.get("required", False):
+            param_name = param.get("name", "")
+            param_schema = param.get("schema", param)
+            query_params[param_name] = generate_data_from_schema(
+                param_schema, parser, generator, param_name
+            )
+
+    # Generate headers
+    headers: dict[str, str] = {}
+
+    # Add authorization header for protected endpoints
+    if step.auth_requirement == AuthRequirement.REQUIRED:
+        auth_step_id = _find_auth_provider_step(step.id, test_plan, step.depends_on)
+        if auth_step_id:
+            headers["Authorization"] = f"Bearer {{{{{auth_step_id}.access_token}}}}"
+
+    # Add required header parameters
+    for param in params_schema.get("header", []):
+        if param.get("required", False):
+            param_name = param.get("name", "")
+            param_schema = param.get("schema", param)
+            value = generate_data_from_schema(
+                param_schema, parser, generator, param_name
+            )
+            headers[param_name] = str(value)
+
+    return MockedPayload(
+        step_id=step.id,
+        request_body=request_body,
+        path_params=path_params,
+        query_params=query_params,
+        headers=headers,
+    )
+
+
 async def run_data_generation_phase(
     test_plan: APIPlan,
     openapi_spec: dict,
     credentials: APICredentials | None = None,
-    use_llm: bool = True,
+    use_llm: bool = False,
     per_step: bool = True,
     seed: int | str | None = None,
     max_concurrent: int | None = None,
@@ -665,18 +840,24 @@ async def run_data_generation_phase(
     """
     Run the data generation phase: generate mock data for all test steps.
 
+    By default, uses deterministic generation which is fast and handles:
+    - Schema-based data generation from OpenAPI spec
+    - Automatic placeholder generation for path params that reference dependencies
+    - Auth header placeholders for protected endpoints  
+    - Credential injection for auth provider endpoints
+
+    LLM-based generation is available for complex cases but is optional.
+
     Args:
         test_plan: The test plan from the preliminary phase
         openapi_spec: The OpenAPI specification
         credentials: Optional credentials to use for authentication steps
-        use_llm: If True, use LLM-based generation; if False, use deterministic generation
-        per_step: If True and use_llm=True, generate data per-step with weak model (default).
+        use_llm: If True, use LLM-based generation; if False (default), use deterministic
+        per_step: If True and use_llm=True, generate data per-step with weak model.
                   If False and use_llm=True, generate all data in one bulk request with strong model.
-        seed: Optional seed for deterministic generation (only used when use_llm=False)
+        seed: Optional seed for deterministic generation
         max_concurrent: Maximum number of concurrent LLM requests (None = unlimited).
-                        Use this to throttle API calls and avoid rate limiting.
-        request_delay: Minimum delay (in seconds) between LLM requests. Useful to prevent
-                       rate limiting with smaller models. Defaults to settings.request_delay.
+        request_delay: Minimum delay (in seconds) between LLM requests.
 
     Returns:
         GeneratedTestData containing mock payloads for each test step

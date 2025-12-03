@@ -193,7 +193,7 @@ async def run():
 
     # ==================== Phase 2: Data Generation ====================
     print(f"\n{'=' * 60}")
-    print("PHASE 2: Test Data Generation")
+    print("PHASE 2: Test Data Generation (Deterministic)")
     print(f"{'=' * 60}")
 
     test_data = await run_data_generation_phase(
