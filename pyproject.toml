@@ -10,6 +10,7 @@ dependencies = [
     "logfire",
     "pydantic-settings",
     "python-dotenv",
+    "rich",
 ]
 
 [project.scripts]

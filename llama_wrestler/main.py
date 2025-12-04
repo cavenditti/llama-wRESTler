@@ -1,12 +1,18 @@
 import asyncio
 import json
 import logfire
+import logging
 from pathlib import Path
 import argparse
-from devtools import debug
 import re
 from datetime import datetime
 from dotenv import load_dotenv
+
+from llama_wrestler.logging_config import (
+    setup_logging,
+    get_logger,
+    DEFAULT_LEVEL,
+)
 
 from llama_wrestler.phases import (
     run_preliminary_phase,
@@ -140,7 +146,26 @@ async def run():
         default=5,
         help="Number of endpoints per batch for failure recap generation (default: 5)",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Increase verbosity (-v for INFO level, -vv for DEBUG level)",
+    )
     args = parser.parse_args()
+
+    # Configure logging based on verbosity flags
+    match args.verbose:
+        case 0:
+            log_level = DEFAULT_LEVEL  # UPDATE_LEVEL - show PHASE, STEP, UPDATE
+        case 1:
+            log_level = logging.INFO  # Show INFO and above
+        case _:
+            log_level = logging.DEBUG  # Show DEBUG and above
+
+    setup_logging(level=log_level)
+    logger = get_logger(__name__)
 
     repo_path = Path(args.repo) if args.repo else None
 
@@ -152,12 +177,12 @@ async def run():
             with open(creds_path) as f:
                 creds_data = json.load(f)
             credentials = APICredentials(**creds_data)
-            print(f"Loaded credentials from {args.credentials_file}")
+            logger.info(f"Loaded credentials from {args.credentials_file}")
         else:
-            print(f"Warning: Credentials file not found: {args.credentials_file}")
+            logger.warning(f"Credentials file not found: {args.credentials_file}")
     elif args.username or args.password:
         credentials = APICredentials(username=args.username, password=args.password)
-        print(f"Using provided credentials for user: {args.username}")
+        logger.info(f"Using provided credentials for user: {args.username}")
 
     # Output directory setup
     output_dir = Path("output")
@@ -165,12 +190,10 @@ async def run():
     run_directory = create_run_directory(output_dir, args.openapi_url)
 
     # ==================== Phase 1: Preliminary ====================
-    print(f"\n{'=' * 60}")
-    print("PHASE 1: Preliminary Analysis")
-    print(f"{'=' * 60}")
-    print(f"Analyzing OpenAPI spec at: {args.openapi_url}")
+    logger.phase("PHASE 1: Preliminary Analysis")
+    logger.update(f"Analyzing OpenAPI spec at: {args.openapi_url}")
     if repo_path:
-        print(f"Analyzing repository at: {repo_path}")
+        logger.update(f"Analyzing repository at: {repo_path}")
 
     # First, fetch the OpenAPI spec to check for cached test plans
     import httpx
@@ -182,19 +205,19 @@ async def run():
 
     # Compute hash of normalized spec
     spec_hash = compute_spec_hash(openapi_spec)
-    print(f"Spec hash: {spec_hash[:16]}...")
+    logger.update(f"Spec hash: {spec_hash[:16]}...")
 
     # Check for cached test plan
     cached_plan = None
     if not args.no_cache:
         cached_plan = find_cached_test_plan(output_dir, spec_hash)
         if cached_plan:
-            print("Found cached test plan from previous run!")
+            logger.info("Found cached test plan from previous run!")
 
     if cached_plan:
         # Use cached plan
         test_plan = cached_plan
-        print("Using cached test plan (use --no-cache to regenerate)")
+        logger.info("Using cached test plan (use --no-cache to regenerate)")
     else:
         # Generate new test plan
         preliminary_result = await run_preliminary_phase(
@@ -209,49 +232,45 @@ async def run():
     # Sort the test plan in topological + lexicographical order
     test_plan = sort_api_plan(test_plan)
 
-    print("\n--- Generated Test Plan ---")
-    debug(test_plan)
+    logger.debugf(test_plan)
 
     # Validate auth requirements against spec
     auth_warnings = validate_auth_requirements(test_plan, openapi_spec)
     if auth_warnings:
-        print("\n--- Authentication Validation Warnings ---")
         for warning in auth_warnings:
-            print(f"  ⚠️  {warning}")
+            logger.warning(f"  {warning}")
 
         # Auto-fix auth requirements based on OpenAPI spec
-        print("\n--- Auto-fixing auth requirements ---")
+        logger.update("Auto-fixing auth requirements...")
         test_plan = fix_auth_requirements_from_spec(test_plan, openapi_spec)
 
         # Re-validate to confirm fixes
         remaining_warnings = validate_auth_requirements(test_plan, openapi_spec)
         if remaining_warnings:
-            print("  Some warnings could not be auto-fixed:")
+            logger.warning("Some warnings could not be auto-fixed:")
             for warning in remaining_warnings:
-                print(f"    ⚠️  {warning}")
+                logger.warning(f"  {warning}")
         else:
-            print("  ✓ All auth requirements fixed!")
+            logger.update("✓ All auth requirements fixed!")
 
     # Save the OpenAPI spec
     openapi_filename = run_directory / "openapi_spec.json"
     with open(openapi_filename, "w") as f:
         json.dump(openapi_spec, f, indent=2)
-    print(f"OpenAPI spec saved to {openapi_filename}")
+    logger.update(f"OpenAPI spec saved to {openapi_filename}")
 
     # Save the spec hash
     save_spec_hash(run_directory, spec_hash)
-    print(f"Spec hash saved to {run_directory / 'spec_hash.txt'}")
+    logger.update(f"Spec hash saved to {run_directory / 'spec_hash.txt'}")
 
     # Save the test plan (sorted)
     test_plan_filename = run_directory / "test_plan.json"
     with open(test_plan_filename, "w") as f:
         f.write(test_plan.model_dump_json(indent=2))
-    print(f"Test plan saved to {test_plan_filename}")
+    logger.update(f"Test plan saved to {test_plan_filename}")
 
     # ==================== Phase 2: Data Generation ====================
-    print(f"\n{'=' * 60}")
-    print("PHASE 2: Test Data Generation (Deterministic)")
-    print(f"{'=' * 60}")
+    logger.phase("PHASE 2: Test Data Generation (Deterministic)")
 
     test_data = await run_data_generation_phase(
         test_plan=test_plan,
@@ -259,25 +278,20 @@ async def run():
         credentials=credentials,
     )
 
-    print("\n--- Generated Test Data ---")
-    debug(test_data)
+    logger.debugf(test_data)
 
     # Save the generated test data
     test_data_filename = run_directory / "test_data.json"
     with open(test_data_filename, "w") as f:
         f.write(test_data.model_dump_json(indent=2))
-    print(f"Test data saved to {test_data_filename}")
+    logger.update(f"Test data saved to {test_data_filename}")
 
     # ==================== Phase 3: Test Execution ====================
     if args.skip_execution:
-        print(f"\n{'=' * 60}")
-        print("PHASE 3: Test Execution (SKIPPED)")
-        print(f"{'=' * 60}")
+        logger.phase("PHASE 3: Test Execution (SKIPPED)")
         return
 
-    print(f"\n{'=' * 60}")
-    print("PHASE 3: Test Execution")
-    print(f"{'=' * 60}")
+    logger.phase("PHASE 3: Test Execution")
 
     execution_result = await run_test_execution_phase(
         test_plan=test_plan,
@@ -289,35 +303,33 @@ async def run():
     def print_execution_summary(result, iteration: int | None = None):
         """Print a summary of execution results."""
         iter_str = f" (Iteration {iteration})" if iteration else ""
-        print(f"\n--- Test Execution Results{iter_str} ---")
-        print(f"Total: {result.total_steps}")
-        print(f"Passed: {result.passed}")
-        print(f"Failed: {result.failed}")
-        print(f"Skipped: {result.skipped}")
-        print(f"Pass Rate: {calculate_pass_rate(result):.1f}%")
+        logger.update(
+            f"Test Execution Results{iter_str}: {result.passed}/{result.total_steps} passed ({calculate_pass_rate(result):.1f}%)"
+        )
+        logger.info(f"  Failed: {result.failed}, Skipped: {result.skipped}")
 
     print_execution_summary(execution_result)
 
-    # Print individual results
+    # Log individual results
     for result in execution_result.results:
         status = "✓" if result.success else "✗"
-        print(
-            f"  {status} {result.step_id}: {result.status_code or 'N/A'} (expected {result.expected_status})"
+        log_level = logging.INFO if result.success else logging.WARNING
+        logger.log(
+            log_level,
+            f"  {status} {result.step_id}: {result.status_code or 'N/A'} (expected {result.expected_status})",
         )
         if result.error:
-            print(f"      Error: {result.error}")
+            logger.warning(f"      Error: {result.error}")
 
     # Save initial execution results
     execution_result_filename = run_directory / "execution_results.json"
     with open(execution_result_filename, "w") as f:
         f.write(execution_result.model_dump_json(indent=2))
-    print(f"\nExecution results saved to {execution_result_filename}")
+    logger.update(f"Execution results saved to {execution_result_filename}")
 
     # ==================== Phase 4: Iterative Refinement ====================
     if args.no_refinement:
-        print(f"\n{'=' * 60}")
-        print("PHASE 4: Refinement (SKIPPED)")
-        print(f"{'=' * 60}")
+        logger.phase("PHASE 4: Refinement (SKIPPED)")
         return
 
     current_pass_rate = calculate_pass_rate(execution_result)
@@ -325,23 +337,21 @@ async def run():
 
     # Check if refinement is needed
     if current_pass_rate >= args.target_pass_rate:
-        print(f"\n✓ Target pass rate ({args.target_pass_rate}%) already achieved!")
+        logger.update(
+            f"✓ Target pass rate ({args.target_pass_rate}%) already achieved!"
+        )
         return
 
     if refinable_failures == 0:
-        print("\n⚠ No refinable failures found (all failures are dependency-based)")
+        logger.update(
+            "⚠ No refinable failures found (all failures are dependency-based)"
+        )
         return
 
-    print(f"\n{'=' * 60}")
-    print("PHASE 4: Iterative Refinement")
-    print(f"{'=' * 60}")
-    print(f"Current pass rate: {current_pass_rate:.1f}%")
-    print(f"Target pass rate: {args.target_pass_rate}%")
-    print(f"Max iterations: {args.max_iterations}")
-    print(f"Refinable failures: {refinable_failures}")
-    if not args.no_multi_run:
-        print(f"Execution runs per iteration: {args.execution_runs}")
-        print(f"Recap batch size: {args.recap_batch_size}")
+    logger.phase("PHASE 4: Iterative Refinement")
+    logger.update(
+        f"Current: {current_pass_rate:.1f}% → Target: {args.target_pass_rate}% (max {args.max_iterations} iterations, {refinable_failures} refinable failures)"
+    )
 
     # Initialize iteration history for regression tracking
     history = IterationHistory()
@@ -351,15 +361,13 @@ async def run():
     iteration = 0
     while iteration < args.max_iterations:
         iteration += 1
-        print(f"\n{'─' * 40}")
-        print(f"Refinement Iteration {iteration}/{args.max_iterations}")
-        print(f"{'─' * 40}")
+        logger.step(f"Refinement Iteration {iteration}/{args.max_iterations}")
 
         # Multi-run execution and recap generation
         pre_analysis_recap = None
         if not args.no_multi_run and args.execution_runs > 1:
-            print(
-                f"\nRunning {args.execution_runs} execution passes for stable failure detection..."
+            logger.update(
+                f"Running {args.execution_runs} execution passes for stable failure detection..."
             )
             aggregated_result = await run_multiple_executions(
                 test_plan=test_plan,
@@ -373,15 +381,14 @@ async def run():
             flaky_steps = aggregated_result.get_flaky_steps()
             consistently_passing = aggregated_result.get_consistently_passing_steps()
 
-            print(f"\nMulti-run Analysis ({args.execution_runs} runs):")
-            print(f"  Consistently passing: {len(consistently_passing)}")
-            print(f"  Consistently failing: {len(consistently_failing)}")
-            print(f"  Flaky (inconsistent): {len(flaky_steps)}")
+            logger.update(
+                f"Multi-run: {len(consistently_passing)} passing, {len(consistently_failing)} failing, {len(flaky_steps)} flaky"
+            )
 
             if flaky_steps:
-                print(f"  ⚠️ Flaky tests detected: {', '.join(flaky_steps[:5])}")
-                if len(flaky_steps) > 5:
-                    print(f"      ... and {len(flaky_steps) - 5} more")
+                logger.warning(
+                    f"Flaky tests: {', '.join(flaky_steps[:5])}{'...' if len(flaky_steps) > 5 else ''}"
+                )
 
             # Use consensus result for refinement
             if aggregated_result.consensus_result:
@@ -389,8 +396,8 @@ async def run():
 
             # Generate failure recaps using weak model
             if consistently_failing or flaky_steps:
-                print(
-                    f"\nGenerating failure analysis recaps (batch size: {args.recap_batch_size})..."
+                logger.update(
+                    f"Generating failure analysis recaps (batch size: {args.recap_batch_size})..."
                 )
                 recap = await generate_failure_recaps(
                     test_plan=test_plan,
@@ -403,15 +410,12 @@ async def run():
                 )
                 pre_analysis_recap = format_recap_for_refinement(recap)
 
-                print("\nPre-Analysis Summary:")
-                print(f"  {recap.overall_summary}")
+                logger.update(f"Pre-Analysis: {recap.overall_summary}")
                 if recap.priority_fixes:
-                    print(f"  Priority fixes identified: {len(recap.priority_fixes)}")
-                    for fix in recap.priority_fixes[:3]:
-                        print(f"    - {fix[:80]}...")
+                    logger.info(f"  Priority fixes: {len(recap.priority_fixes)}")
 
         # Run refinement phase
-        print("\nAnalyzing failures and generating refined payloads...")
+        logger.update("Analyzing failures and generating refined payloads...")
         test_plan, test_data, refinement_result = await run_refinement_phase(
             test_plan=test_plan,
             openapi_spec=openapi_spec,
@@ -423,51 +427,53 @@ async def run():
             iteration=iteration,
         )
 
-        print("\nRefinement Analysis:")
-        print(f"  {refinement_result.analysis_summary}")
-        print(f"  Payloads refined: {len(refinement_result.refined_payloads)}")
-        print(f"  Steps refined: {len(refinement_result.refined_steps)}")
+        logger.update(
+            f"Refinement: {len(refinement_result.refined_payloads)} payloads, {len(refinement_result.refined_steps)} steps refined"
+        )
+        logger.info(f"  {refinement_result.analysis_summary}")
 
         # Report unfixable steps
         if refinement_result.unfixable_steps:
-            print(
-                f"  ⛔ Steps marked unfixable: {len(refinement_result.unfixable_steps)}"
+            logger.warning(
+                f"  Steps marked unfixable: {len(refinement_result.unfixable_steps)}"
             )
             for unfixable in refinement_result.unfixable_steps:
-                print(
+                logger.warning(
                     f"      - {unfixable.step_id} ({unfixable.category}): {unfixable.reason[:60]}..."
                 )
 
         # Report steps with broken dependencies that need fixing
         if execution_result.steps_with_broken_deps:
-            print(
-                f"  ⚠️ Steps with invalid dependencies: {len(execution_result.steps_with_broken_deps)}"
+            logger.warning(
+                f"  Steps with invalid dependencies: {len(execution_result.steps_with_broken_deps)}"
             )
             for step_id, broken_deps in execution_result.steps_with_broken_deps.items():
-                print(f"      - {step_id}: missing [{', '.join(broken_deps)}]")
+                logger.warning(f"      - {step_id}: missing [{', '.join(broken_deps)}]")
 
         # Report regressions that were detected and reverted
         regressions = history.get_regressions()
         if regressions:
-            print(f"  ⚠️ Regressions detected and reverted: {len(regressions)}")
+            logger.warning(f"  Regressions detected and reverted: {len(regressions)}")
             for step_id in regressions:
-                print(f"      - {step_id}")
+                logger.warning(f"      - {step_id}")
 
         # Report steps with multiple failed attempts
         multi_failure_steps = history.get_steps_with_multiple_failures(min_attempts=3)
         if multi_failure_steps:
-            print(f"  📊 Steps with 3+ failed fix attempts: {len(multi_failure_steps)}")
+            logger.info(
+                f"  Steps with 3+ failed fix attempts: {len(multi_failure_steps)}"
+            )
             for step_id in multi_failure_steps[:5]:
                 attempt_count = len(history.get_failed_attempts(step_id))
-                print(f"      - {step_id}: {attempt_count} failed attempts")
+                logger.info(f"      - {step_id}: {attempt_count} failed attempts")
             if len(multi_failure_steps) > 5:
-                print(f"      ... and {len(multi_failure_steps) - 5} more")
+                logger.info(f"      ... and {len(multi_failure_steps) - 5} more")
 
         if (
             not refinement_result.refined_payloads
             and not refinement_result.refined_steps
         ):
-            print("\n⚠ No refinements made - stopping iteration")
+            logger.update("⚠ No refinements made - stopping iteration")
             break
 
         # Save refined test plan if steps were modified
@@ -475,16 +481,16 @@ async def run():
             refined_plan_filename = run_directory / f"test_plan_iter{iteration}.json"
             with open(refined_plan_filename, "w") as f:
                 f.write(test_plan.model_dump_json(indent=2))
-            print(f"Refined test plan saved to {refined_plan_filename}")
+            logger.update(f"Refined test plan saved to {refined_plan_filename}")
 
         # Save refined test data
         refined_data_filename = run_directory / f"test_data_iter{iteration}.json"
         with open(refined_data_filename, "w") as f:
             f.write(test_data.model_dump_json(indent=2))
-        print(f"Refined test data saved to {refined_data_filename}")
+        logger.update(f"Refined test data saved to {refined_data_filename}")
 
         # Re-execute tests with refined data
-        print("\nRe-executing tests with refined payloads...")
+        logger.update("Re-executing tests with refined payloads...")
         execution_result = await run_test_execution_phase(
             test_plan=test_plan,
             test_data=test_data,
@@ -509,11 +515,11 @@ async def run():
         refinable_failures = get_refinable_failure_count(execution_result)
 
         if current_pass_rate >= args.target_pass_rate:
-            print(f"\n✓ Target pass rate ({args.target_pass_rate}%) achieved!")
+            logger.update(f"✓ Target pass rate ({args.target_pass_rate}%) achieved!")
             break
 
         if refinable_failures == 0:
-            print("\n⚠ No more refinable failures - stopping iteration")
+            logger.update("⚠ No more refinable failures - stopping iteration")
             break
 
     # Save final results
@@ -529,15 +535,13 @@ async def run():
     with open(final_plan_filename, "w") as f:
         f.write(test_plan.model_dump_json(indent=2))
 
-    print(f"\n{'=' * 60}")
-    print("FINAL RESULTS")
-    print(f"{'=' * 60}")
-    print(f"Iterations completed: {iteration}")
-    print(f"Final pass rate: {current_pass_rate:.1f}%")
-    print(f"Total passed: {execution_result.passed}/{execution_result.total_steps}")
-    print(f"\nFinal results saved to {final_results_filename}")
-    print(f"Final test data saved to {final_data_filename}")
-    print(f"Final test plan saved to {final_plan_filename}")
+    logger.phase("FINAL RESULTS")
+    logger.update(
+        f"Completed {iteration} iterations: {current_pass_rate:.1f}% pass rate ({execution_result.passed}/{execution_result.total_steps})"
+    )
+    logger.update(f"Results: {final_results_filename}")
+    logger.update(f"Test data: {final_data_filename}")
+    logger.update(f"Test plan: {final_plan_filename}")
 
 
 if __name__ == "__main__":
