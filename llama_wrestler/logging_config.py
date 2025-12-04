@@ -11,7 +11,7 @@ from typing import Optional, Any
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.theme import Theme
-from devtools import pformat
+from devtools import debug, pformat
 
 
 # Custom log levels
@@ -49,7 +49,7 @@ class Logger(logging.Logger):
     def debugf(self, obj: Any) -> None:
         """Log an object using devtools formatting at DEBUG level."""
         if self.isEnabledFor(logging.DEBUG):
-            self.debug(pformat(obj))
+            self.debug(debug.format(obj))
 
 
 # Set our custom Logger class as the default

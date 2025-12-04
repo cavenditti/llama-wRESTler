@@ -232,6 +232,13 @@ async def run():
     # Sort the test plan in topological + lexicographical order
     test_plan = sort_api_plan(test_plan)
 
+    # Count unique endpoints and methods
+    endpoints = set((s.method, s.endpoint) for s in test_plan.steps)
+    methods = {}
+    for s in test_plan.steps:
+        methods[s.method] = methods.get(s.method, 0) + 1
+    methods_str = ", ".join(f"{m}: {c}" for m, c in sorted(methods.items()))
+    logger.info(f"Test plan: {len(test_plan.steps)} steps covering {len(endpoints)} endpoints ({methods_str})")
     logger.debugf(test_plan)
 
     # Validate auth requirements against spec
@@ -278,6 +285,10 @@ async def run():
         credentials=credentials,
     )
 
+    # Count payloads with bodies vs path-only
+    with_body = sum(1 for p in test_data.payloads if p.request_body)
+    with_query = sum(1 for p in test_data.payloads if p.query_params)
+    logger.info(f"Test data: {len(test_data.payloads)} payloads ({with_body} with body, {with_query} with query params)")
     logger.debugf(test_data)
 
     # Save the generated test data
