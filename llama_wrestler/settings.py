@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # Weak model for summarization/recap tasks (faster, cheaper)
     weak_model: str = "openai:gpt-4o-mini"
 
+    # Maximum number of passes to attempt for full endpoint coverage in preliminary phase
+    max_coverage_passes: int = 3
+
     # Legacy OpenAI-specific settings (kept for backwards compatibility)
     # These are only used if the model string doesn't include a provider prefix
     openai_api_key: str | None = None

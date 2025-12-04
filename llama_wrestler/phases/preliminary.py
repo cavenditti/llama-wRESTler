@@ -6,12 +6,10 @@ import logging
 
 from llama_wrestler.agent import agent, AgentDeps
 from llama_wrestler.models import APIPlan, APIStep
+from llama_wrestler.settings import settings
 
 
 logger = logging.getLogger(__name__)
-
-# Maximum number of passes to attempt for full endpoint coverage
-MAX_COVERAGE_PASSES = 3
 
 
 @dataclass
@@ -129,7 +127,7 @@ async def run_preliminary_phase(
     This function ensures full endpoint coverage by:
     1. Generating an initial test plan
     2. Checking against the OpenAPI spec for missing endpoints
-    3. Running additional passes (up to MAX_COVERAGE_PASSES) to cover missing endpoints
+    3. Running additional passes (up to settings.max_coverage_passes) to cover missing endpoints
     4. Merging results deterministically
 
     Args:
@@ -158,7 +156,7 @@ async def run_preliminary_phase(
 
         # Check for missing endpoints and run additional passes if needed
         if openapi_spec:
-            for pass_num in range(1, MAX_COVERAGE_PASSES + 1):
+            for pass_num in range(1, settings.max_coverage_passes + 1):
                 missing = find_missing_endpoints(openapi_spec, current_plan)
 
                 if not missing:
