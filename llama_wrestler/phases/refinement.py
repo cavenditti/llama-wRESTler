@@ -263,23 +263,20 @@ def fix_auth_requirements_from_spec(test_plan: APIPlan, openapi_spec: dict) -> A
         Updated APIPlan with corrected auth requirements
     """
     spec_requirements = extract_security_requirements(openapi_spec)
-    security_defs = get_security_definitions(openapi_spec)
+    _security_defs = get_security_definitions(openapi_spec)
 
     updated_steps = []
     for step in test_plan.steps:
         # Build the endpoint key to look up in spec
-        endpoint_key = f"{step.method.upper()} {step.endpoint}"
+        endpoint_key = f"{step.method} {step.endpoint}".upper()
 
         # Also try to match path parameter patterns
         matching_key = None
         for spec_key in spec_requirements:
-            spec_method, spec_path = spec_key.split(" ", 1)
-            if spec_method != step.method.upper():
+            if spec_key.upper() != endpoint_key:
                 continue
 
-            if spec_path == step.endpoint:
-                matching_key = spec_key
-                break
+            _spec_method, spec_path = spec_key.split(" ", 1)
 
             # Convert path params like {id} to regex pattern
             pattern = re.sub(r"\{[^}]+\}", r"[^/]+", spec_path)

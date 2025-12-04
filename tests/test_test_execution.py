@@ -58,7 +58,7 @@ def test_execute_step_applies_auth_header():
         async with httpx.AsyncClient(transport=transport) as client:
             ctx = ExecutionContext(http_client=client, base_url="https://api.test")
             ctx.auth_tokens["login"] = "t-123"
-            step = APIStep(
+            step = APIStep(  # type: ignore
                 id="protected",
                 description="protected endpoint",
                 endpoint="/ping",
@@ -83,7 +83,7 @@ def test_run_test_execution_skips_failed_dependencies():
     async def _run():
         request_count = {"count": 0}
 
-        async def handler(request: httpx.Request) -> httpx.Response:
+        async def handler(request: httpx.Request) -> httpx.Response:  # type: ignore
             request_count["count"] += 1
             return httpx.Response(500, json={"error": "nope"})
 
@@ -92,7 +92,7 @@ def test_run_test_execution_skips_failed_dependencies():
             summary="failing plan",
             base_url="https://api.test",
             steps=[
-                APIStep(
+                APIStep(  # type: ignore
                     id="first",
                     description="first call fails",
                     endpoint="/fail",
@@ -100,7 +100,7 @@ def test_run_test_execution_skips_failed_dependencies():
                     expected_status=200,
                     body_format=BodyFormat.NONE,
                 ),
-                APIStep(
+                APIStep(  # type: ignore
                     id="second",
                     description="should be skipped",
                     endpoint="/next",
@@ -133,13 +133,13 @@ def test_run_test_execution_skips_failed_dependencies():
 
 def test_execute_step_reports_exception_type():
     async def _run():
-        async def handler(request: httpx.Request) -> httpx.Response:
+        async def handler(request: httpx.Request) -> httpx.Response:  # type: ignore
             raise httpx.ReadTimeout("socket timed out")
 
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             ctx = ExecutionContext(http_client=client, base_url="https://api.test")
-            step = APIStep(
+            step = APIStep(  # type: ignore
                 id="timeout",
                 description="simulate timeout",
                 endpoint="/slow",
@@ -165,7 +165,7 @@ def test_run_test_execution_sanitizes_missing_dependency():
             summary="missing dep",
             base_url="https://api.test",
             steps=[
-                APIStep(
+                APIStep(  # type: ignore
                     id="orphan",
                     description="depends on missing step",
                     endpoint="/orphan",
@@ -182,7 +182,7 @@ def test_run_test_execution_sanitizes_missing_dependency():
             ]
         )
 
-        transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))  # type: ignore
         async with httpx.AsyncClient(transport=transport) as client:
             result = await run_test_execution_phase(
                 test_plan, test_data, http_client=client
@@ -204,7 +204,7 @@ def test_run_test_execution_tracks_broken_dependencies():
             summary="broken deps tracking",
             base_url="https://api.test",
             steps=[
-                APIStep(
+                APIStep(  # type: ignore
                     id="step1",
                     description="valid step",
                     endpoint="/step1",
@@ -212,7 +212,7 @@ def test_run_test_execution_tracks_broken_dependencies():
                     expected_status=200,
                     body_format=BodyFormat.NONE,
                 ),
-                APIStep(
+                APIStep(  # type: ignore
                     id="step2",
                     description="depends on missing steps",
                     endpoint="/step2",
@@ -230,7 +230,7 @@ def test_run_test_execution_tracks_broken_dependencies():
             ]
         )
 
-        transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))  # type: ignore
         async with httpx.AsyncClient(transport=transport) as client:
             result = await run_test_execution_phase(
                 test_plan, test_data, http_client=client
@@ -252,7 +252,6 @@ def test_run_test_execution_tracks_broken_dependencies():
 
 def test_run_multiple_executions_aggregates_results():
     """Test that run_multiple_executions correctly aggregates results from multiple runs."""
-    from llama_wrestler.phases.execution_analysis import run_multiple_executions
 
     async def _run():
         # Create a test that sometimes passes, sometimes fails (simulated with counter)
@@ -265,12 +264,12 @@ def test_run_multiple_executions_aggregates_results():
                 return httpx.Response(500, json={"error": "first call fails"})
             return httpx.Response(200, json={"ok": True})
 
-        transport = httpx.MockTransport(handler)
-        test_plan = APIPlan(
+        _transport = httpx.MockTransport(handler)
+        _test_plan = APIPlan(
             summary="flaky test",
             base_url="https://api.test",
             steps=[
-                APIStep(
+                APIStep(  # type: ignore
                     id="flaky",
                     description="sometimes fails",
                     endpoint="/flaky",
@@ -280,7 +279,7 @@ def test_run_multiple_executions_aggregates_results():
                 ),
             ],
         )
-        test_data = GeneratedTestData(
+        _test_data = GeneratedTestData(
             payloads=[
                 MockedPayload(step_id="flaky", request_body=None),
             ]
@@ -295,7 +294,7 @@ def test_run_multiple_executions_aggregates_results():
         async def consistent_handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"ok": True})
 
-        transport = httpx.MockTransport(consistent_handler)
+        _transport = httpx.MockTransport(consistent_handler)
 
         # Note: run_multiple_executions doesn't accept http_client param
         # This is a structural test more than a behavioral test
